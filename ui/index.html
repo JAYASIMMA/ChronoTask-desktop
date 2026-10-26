@@ -1,0 +1,122 @@
+<!DOCTYPE html>
+<html class="dark" lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>ChronoTask</title>
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet" />
+<link rel="stylesheet" href="./styles.css" />
+</head>
+<body>
+<!-- ===================== title bar ===================== -->
+<header class="titlebar">
+  <div class="tb-left">
+    <div class="traffic" title="Window controls">
+      <button class="dot dot-red" data-win="close" aria-label="Close to tray"></button>
+      <button class="dot dot-amber" data-win="minimise" aria-label="Minimise"></button>
+      <button class="dot dot-green" data-win="show" aria-label="Restore"></button>
+    </div>
+    <span class="tb-sep"></span>
+    <div class="brand">
+      <svg class="brand-mark" viewBox="0 0 32 32" aria-hidden="true">
+        <circle cx="11" cy="8" r="3" fill="currentColor" opacity=".85"/>
+        <circle cx="21" cy="8" r="3" fill="currentColor" opacity=".85"/>
+        <circle cx="16" cy="18" r="10.5" fill="#4f46e5"/>
+        <circle cx="16" cy="18" r="7.5" fill="#e2dfff"/>
+        <path d="M16 18V12" stroke="#1d00a5" stroke-width="1.9" stroke-linecap="round"/>
+        <path d="M16 18l4.4 2.6" stroke="#1d00a5" stroke-width="1.6" stroke-linecap="round"/>
+        <circle cx="25.5" cy="8.5" r="2.6" fill="#4edea3"/>
+      </svg>
+      <span class="brand-name">ChronoTask</span>
+      <span class="chip chip-version" id="appVersion">v2.4.1</span>
+    </div>
+  </div>
+
+  <div class="tb-center">
+    <button class="palette-btn" id="paletteBtn">
+      <span class="mi">search</span>
+      <span>Search tasks, alarms, or run a command…</span>
+      <kbd>Ctrl</kbd><kbd>K</kbd>
+    </button>
+  </div>
+
+  <div class="tb-right">
+    <button class="btn btn-primary" id="btnNewTask"><span class="mi">add_task</span>New Task<kbd>^N</kbd></button>
+    <button class="btn btn-ghost" id="btnSetAlarm"><span class="mi mi-accent">alarm_add</span>Set Alarm<kbd>^A</kbd></button>
+    <span class="tb-sep"></span>
+    <div class="sync-chip" id="syncChip" title="Scheduler heartbeat">
+      <span class="pulse"></span><span id="syncLabel">connecting…</span>
+    </div>
+    <button class="icon-btn" id="btnTheme" title="Toggle theme"><span class="mi">dark_mode</span></button>
+  </div>
+</header>
+
+<!-- ===================== sidebar ===================== -->
+<aside class="sidebar">
+  <div class="side-top">
+    <div class="side-label">
+      <span>Workspace Views</span>
+      <span class="mi" id="navDensity" title="Toggle compact rows">density_small</span>
+    </div>
+    <nav id="nav">
+      <button data-view="tasks" class="nav-item is-active" aria-current="page">
+        <span class="mi">check_circle</span><span class="nav-text">Tasks</span><span class="badge" id="navTasks">0</span>
+      </button>
+      <button data-view="alarms" class="nav-item">
+        <span class="mi mi-mint">timer</span><span class="nav-text">Alarms &amp; Timers</span><span class="badge badge-mint" id="navAlarms">0</span>
+      </button>
+      <button data-view="calendar" class="nav-item">
+        <span class="mi">calendar_today</span><span class="nav-text">Calendar View</span><span class="badge badge-dim" id="navWeek">—</span>
+      </button>
+      <button data-view="missed" class="nav-item">
+        <span class="mi mi-error">notification_important</span><span class="nav-text">Missed Alarms</span><span class="badge badge-error" id="navMissed">0</span>
+      </button>
+      <button data-view="settings" class="nav-item">
+        <span class="mi">settings</span><span class="nav-text">Settings</span><span class="badge badge-dim">DB</span>
+      </button>
+    </nav>
+  </div>
+
+  <div class="side-bottom">
+    <div class="side-label"><span>Active Timer</span><span class="mono" id="timerFlag">IDLE</span></div>
+    <div class="timer-card">
+      <div class="timer-meta">
+        <span class="timer-label" id="timerLabel">No focus block</span>
+        <span class="timer-sub" id="timerSub">Start one from any task</span>
+      </div>
+      <span class="timer-clock mono" id="timerClock">00:00</span>
+    </div>
+    <div class="timer-actions">
+      <button class="btn btn-tiny" id="btnTimerStart"><span class="mi">play_arrow</span>25m</button>
+      <button class="btn btn-tiny" id="btnTimerPause" disabled><span class="mi">pause</span>Pause</button>
+      <button class="btn btn-tiny" id="btnTimerStop" disabled><span class="mi">stop</span>Stop</button>
+    </div>
+  </div>
+</aside>
+
+<!-- ===================== main ===================== -->
+<main class="content" id="content" tabindex="-1"><!-- rendered by app.js --></main>
+
+<!-- ===================== status bar ===================== -->
+<footer class="statusbar">
+  <div class="sb-left">
+    <span class="sb-dot" id="dbDot"></span><span id="dbLabel">Local DB connected (SQLite)</span>
+    <span class="sb-sep">•</span><span id="schedLabel">Scheduler Active</span>
+    <span class="mono sb-drift" id="driftLabel">±0.0s</span>
+  </div>
+  <div class="sb-right">
+    <span class="mono" id="dbSizeLabel">—</span>
+    <span class="sb-sep">•</span>
+    <span class="mono" id="clockLabel">--:--:--</span>
+    <span class="mi mi-mint">cloud_done</span><span>IPC Ready</span>
+  </div>
+</footer>
+
+<div class="toast-host" id="toastHost" role="region" aria-live="polite"></div>
+<div class="modal-host" id="modalHost"></div>
+
+<script src="./app.js"></script>
+</body>
+</html>
