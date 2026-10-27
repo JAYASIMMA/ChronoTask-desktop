@@ -1,10 +1,10 @@
-/* ChronoTask — WebView layer. All persistence and scheduling lives in Rust;
+/* DJ Task Manager — WebView layer. All persistence and scheduling lives in Rust;
    this file only renders state and calls `invoke`. */
 'use strict';
 
 const TAURI = window.__TAURI__;
 const invoke = TAURI?.core?.invoke
-  || (async (cmd) => { throw new Error(`IPC unavailable (asked for "${cmd}") — run inside ChronoTask.exe`); });
+  || (async (cmd) => { throw new Error(`IPC unavailable (asked for "${cmd}") — run inside DJ Task Manager.exe`); });
 const listen = TAURI?.event?.listen || (async () => () => {});
 
 /* ---------------------------------------------------------------- state -- */
@@ -32,6 +32,7 @@ const S = {
   analytics: null,
   activity: [],
   health: null,
+  autostart: null,
 };
 
 const PRIORITY = {
@@ -55,7 +56,7 @@ const GLYPH = {
   calendar_clock: '◷', notifications_active: '🔔', delete: '✕', edit: '✎', refresh: '↻', download: '⤓',
   upload: '⤒', database: '⛃', folder_open: '🗀', keyboard: '⌨', schedule: '⏲', add: '＋', task: '☑',
   notifications: '🔔', bolt: '⚡', history: '↩', save: '⛁', visibility: '👁', error: '⚠',
-  search_off: '⌽', density_small: '≡', more_vert: '⋮', help: '?',
+  search_off: '⌽', density_small: '≡', more_vert: '⋮', help: '?', rotate_right: '↻',
 };
 
 /* ------------------------------------------------------------- helpers -- */
@@ -149,7 +150,7 @@ async function call(cmd, payload) {
     const message = typeof err === 'string' ? err : (err?.message || JSON.stringify(err));
     S.lastError = `${cmd}: ${message}`;
     toast('Command failed', S.lastError, [{ label: 'Dismiss', kind: 'btn-danger' }], 'error');
-    console.error(`[chronotask] ${cmd} failed`, err);
+    console.error(`[dj-task-manager] ${cmd} failed`, err);
     return null;
   }
 }
@@ -163,7 +164,7 @@ function toast(title, body, actions = [], kind = '') {
   el.setAttribute('role', 'alert');
   el.innerHTML = `
     <div class="toast-top">
-      <span class="toast-app"><span class="sq"><span class="mi">alarm</span></span>ChronoTask Daemon</span>
+      <span class="toast-app"><span class="sq"><span class="mi">alarm</span></span>DJ Task Manager</span>
       <span class="toast-when">Just now</span>
     </div>
     <div class="toast-title">${esc(title)}</div>
@@ -202,21 +203,48 @@ function toast(title, body, actions = [], kind = '') {
 
 function openModal(html, onMount) {
   const host = $('#modalHost');
-  host.innerHTML = `<div class="scrim"><div class="modal">${html}</div></div>`;
-  applyIcons(host);
-  const scrim = host.querySelector('.scrim');
-  const close = () => { host.innerHTML = ''; };
+  // Each dialog gets its own layer so a picker can open over an editor without
+  // wiping the draft underneath. Later layers paint above earlier ones.
+  const layer = document.createElement('div');
+  layer.className = 'modal-layer';
+  layer.innerHTML = `<div class="scrim"><div class="modal">${html}</div></div>`;
+  host.appendChild(layer);
+  applyIcons(layer);
+  const scrim = layer.querySelector('.scrim');
+  const close = () => layer.remove();
   scrim.addEventListener('mousedown', (e) => { if (e.target === scrim) close(); });
-  host.addEventListener('click', (e) => { if (e.target.closest('[data-close-modal]')) close(); });
-  onMount?.(host.querySelector('.modal'), close);
-  const first = host.querySelector('input, select, button.btn-primary');
+  scrim.addEventListener('click', (e) => { if (e.target.closest('[data-close-modal]')) close(); });
+  onMount?.(layer.querySelector('.modal'), close);
+  const first = layer.querySelector('input, select, button.btn-primary');
   first?.focus();
   return close;
 }
 
+/** Closes only the topmost dialog — Escape should not discard an editor below it. */
+function closeTopModal() {
+  const layers = document.querySelectorAll('#modalHost .modal-layer');
+  layers[layers.length - 1]?.remove();
+}
+
 /* Builds a date + time picker with repeat rules. mode 'alarm' arms an alarm,
    mode 'due' just resolves a local time and hands it to onPick (task due dates). */
-function openAlarmPicker({ alarm = null, presetAt = null, tasks = [], mode = 'alarm', onPick = null } = {}) {
+/* "07:15", "7:15pm", "19:15", "7.15", "7" all resolve; anything else returns null so
+   a half-typed value never clobbers the current time. */
+function parseTime(raw) {
+  const s = String(raw ?? '').trim().toLowerCase().replace(/\s+/g, '').replace(/[．．:：]/g, ':');
+  const m = s.match(/^(\d{1,2})(?::(\d{1,2}))?(am|pm)?$/);
+  if (!m) return null;
+  let hh = Number(m[1]);
+  const mm = m[2] === undefined ? 0 : Number(m[2]);
+  const ap = m[3];
+  if (hh > 23 || mm > 59) return null;
+  if (ap === 'pm' && hh < 12) hh += 12;
+  if (ap === 'am' && hh === 12) hh = 0;
+  if (ap && hh > 23) return null;
+  return { hh, mm };
+}
+
+function openAlarmPicker({ alarm = null, presetAt = null, tasks = [], mode = 'alarm', onPick = null, title = null, cta = null, presetTaskId = null } = {}) {
   const base = alarm ? new Date(alarm.fireAt * 1000) : new Date((presetAt ?? Math.floor(Date.now() / 1000) + HOUR) * 1000);
   const pick = {
     y: base.getFullYear(), m: base.getMonth(), d: base.getDate(),
@@ -226,11 +254,13 @@ function openAlarmPicker({ alarm = null, presetAt = null, tasks = [], mode = 'al
     snooze: alarm?.snoozeMin ?? Number(S.settings.default_snooze ?? 5),
     sound: alarm?.sound || 'chime',
     label: alarm?.label || '',
-    taskId: alarm?.taskId ?? null,
+    taskId: alarm?.taskId ?? presetTaskId ?? null,
     advanceMin: alarm?.advanceMin ?? 0,
     maxSnoozes: alarm?.maxSnoozes ?? 0,
     escalate: !!alarm?.escalate,
   };
+  // The dial points at hours first, then minutes, which keeps one hand unambiguous.
+  let dialMode = 'hour';
 
   const renderCal = () => {
     const first = new Date(pick.y, pick.m, 1);
@@ -253,6 +283,40 @@ function openAlarmPicker({ alarm = null, presetAt = null, tasks = [], mode = 'al
       </div>
       <div class="dtp-grid">${DOW.map((x) => `<span class="dtp-dow">${x}</span>`).join('')}</div>
       <div class="dtp-grid">${cells.join('')}</div>
+    </div>`;
+  };
+
+  /* Analogue face, drawn once: paintDial() moves the hand afterwards so a drag
+     never replaces the element under the pointer. */
+  const renderDial = () => {
+    const R = 66, CX = 80, CY = 80;
+    const ticks = [];
+    for (let i = 0; i < 60; i++) {
+      const major = i % 5 === 0;
+      const a = (i / 60) * Math.PI * 2 - Math.PI / 2;
+      const r1 = R - (major ? 9 : 4);
+      ticks.push(`<line x1="${(CX + Math.cos(a) * r1).toFixed(1)}" y1="${(CY + Math.sin(a) * r1).toFixed(1)}"
+        x2="${(CX + Math.cos(a) * R).toFixed(1)}" y2="${(CY + Math.sin(a) * R).toFixed(1)}"
+        class="dial-tick${major ? ' is-major' : ''}" />`);
+    }
+    const nums = [];
+    for (let i = 1; i <= 12; i++) {
+      const a = (i / 12) * Math.PI * 2 - Math.PI / 2;
+      nums.push(`<text x="${(CX + Math.cos(a) * (R - 21)).toFixed(1)}" y="${(CY + Math.sin(a) * (R - 21) + 3.5).toFixed(1)}"
+        class="dial-num" data-h="${i}">${i}</text>`);
+    }
+    return `<div class="dial" data-dial role="img" aria-label="Clock face" title="Point or drag to set the time">
+      <svg viewBox="0 0 160 160" aria-hidden="true">
+        <circle cx="${CX}" cy="${CY}" r="${R}" class="dial-face" />
+        ${ticks.join('')}${nums.join('')}
+        <line x1="${CX}" y1="${CY}" x2="${CX}" y2="${CY - R + 12}" class="dial-hand" />
+        <circle cx="${CX}" cy="${CY}" r="3.5" class="dial-pin" />
+        <circle cx="${CX}" cy="${CY - R + 12}" r="7" class="dial-knob" />
+      </svg>
+      <div class="dial-readout mono" data-dialreadout>${pad(pick.hh)}:${pad(pick.mm)}</div>
+      <button class="btn btn-tiny dial-swap" data-dialmode>
+        <span class="mi">rotate_right</span><span data-dialmode-label>set minutes</span>
+      </button>
     </div>`;
   };
 
@@ -315,7 +379,7 @@ function openAlarmPicker({ alarm = null, presetAt = null, tasks = [], mode = 'al
   const html = `
     <div class="modal-head">
       <div>
-        <div class="modal-title">${mode === 'due' ? 'Pick date &amp; time' : (alarm ? 'Edit alarm' : 'Schedule alarm')}</div>
+        <div class="modal-title">${esc(title ?? (mode === 'due' ? 'Pick date & time' : (alarm ? 'Edit alarm' : 'Schedule alarm')))}</div>
         <div class="hint mono" data-summary></div>
       </div>
       <button class="icon-btn" data-close-modal><span class="mi">close</span></button>
@@ -325,20 +389,29 @@ function openAlarmPicker({ alarm = null, presetAt = null, tasks = [], mode = 'al
       <div class="dtp">
         ${renderCal()}
         <div class="time-wheel">
+          ${renderDial()}
           <div class="stack">
-            <label class="field-label">Hour</label>
-            <div class="stepper">
-              <button class="btn btn-tiny" data-hh="-1">−</button>
-              <div><div class="stepper-val" data-hhval>${pad(pick.hh)}</div><div class="stepper-l">24h</div></div>
-              <button class="btn btn-tiny" data-hh="1">+</button>
-            </div>
+            <label class="field-label" for="apTime">Time</label>
+            <input id="apTime" type="text" data-timeinput inputmode="numeric" autocomplete="off"
+                   placeholder="07:15 · 7:15pm · 19:15" value="${pad(pick.hh)}:${pad(pick.mm)}" maxlength="8" />
+            <div class="hint mono">Type it, or point at the clock. ↑/↓ steps a minute, Shift+↑/↓ steps 15.</div>
           </div>
-          <div class="stack">
-            <label class="field-label">Minute</label>
-            <div class="stepper">
-              <button class="btn btn-tiny" data-mm="-5">−5</button>
-              <div><div class="stepper-val" data-mmval>${pad(pick.mm)}</div><div class="stepper-l">step 5m</div></div>
-              <button class="btn btn-tiny" data-mm="5">+5</button>
+          <div class="grid-2">
+            <div class="stack">
+              <label class="field-label">Hour</label>
+              <div class="stepper">
+                <button class="btn btn-tiny" data-hh="-1" aria-label="Hour before">−</button>
+                <div><div class="stepper-val" data-hhval>${pad(pick.hh)}</div><div class="stepper-l">24h</div></div>
+                <button class="btn btn-tiny" data-hh="1" aria-label="Hour after">+</button>
+              </div>
+            </div>
+            <div class="stack">
+              <label class="field-label">Minute</label>
+              <div class="stepper">
+                <button class="btn btn-tiny" data-mm="-5" aria-label="Minutes before">−5</button>
+                <div><div class="stepper-val" data-mmval>${pad(pick.mm)}</div><div class="stepper-l">step 5m</div></div>
+                <button class="btn btn-tiny" data-mm="5" aria-label="Minutes after">+5</button>
+              </div>
             </div>
           </div>
           <div class="stack">
@@ -357,7 +430,7 @@ function openAlarmPicker({ alarm = null, presetAt = null, tasks = [], mode = 'al
       <span class="hint mono">Local time; stored as epoch seconds.</span>
       <div style="display:flex;gap:8px">
         <button class="btn" data-close-modal>Cancel</button>
-        <button class="btn btn-primary" data-save><span class="mi">check</span>${mode === 'due' ? 'Set date' : (alarm ? 'Save alarm' : 'Arm alarm')}</button>
+        <button class="btn btn-primary" data-save><span class="mi">check</span>${esc(cta ?? (mode === 'due' ? 'Set date' : (alarm ? 'Save alarm' : 'Arm alarm')))}</button>
       </div>
     </div>`;
 
@@ -377,6 +450,36 @@ function openAlarmPicker({ alarm = null, presetAt = null, tasks = [], mode = 'al
       $$('.chip[data-maxsnooze]', modal).forEach((c) => c.classList.toggle('is-on', Number(c.dataset.maxsnooze) === pick.maxSnoozes));
       const escBtn = $('[data-escalate]', modal);
       if (escBtn) { escBtn.classList.toggle('is-on', pick.escalate); escBtn.setAttribute('aria-checked', String(pick.escalate)); }
+      // Leave the field alone while it has focus, or typing "7:" would be rewritten.
+      const timeInput = $('[data-timeinput]', modal);
+      if (timeInput && document.activeElement !== timeInput) {
+        timeInput.value = `${pad(pick.hh)}:${pad(pick.mm)}`;
+        timeInput.classList.remove('is-bad');
+      }
+      paintDial();
+    };
+    /* Moves the hand and the readout; the face itself is drawn once so a drag is
+       never interrupted by its own repaint. */
+    const paintDial = () => {
+      const dial = $('[data-dial]', modal);
+      if (!dial) return;
+      const R = 66, CX = 80, CY = 80;
+      const span = dialMode === 'hour' ? 12 : 60;
+      const value = dialMode === 'hour' ? (pick.hh % 12) + pick.mm / 60 : pick.mm;
+      const a = (value / span) * Math.PI * 2 - Math.PI / 2;
+      const x = CX + Math.cos(a) * (R - 12);
+      const y = CY + Math.sin(a) * (R - 12);
+      dial.classList.toggle('is-minute', dialMode === 'minute');
+      const hand = $('.dial-hand', dial), knob = $('.dial-knob', dial);
+      if (hand) { hand.setAttribute('x2', x.toFixed(1)); hand.setAttribute('y2', y.toFixed(1)); }
+      if (knob) { knob.setAttribute('cx', x.toFixed(1)); knob.setAttribute('cy', y.toFixed(1)); }
+      const shown = dialMode === 'hour' ? (pick.hh % 12 || 12) : pick.mm;
+      $$('.dial-num', dial).forEach((n) => n.classList.toggle('is-sel', dialMode === 'hour' && Number(n.dataset.h) === shown));
+      const readout = $('[data-dialreadout]', dial);
+      if (readout) readout.textContent = `${pad(pick.hh)}:${pad(pick.mm)}`;
+      const label = $('[data-dialmode-label]', dial);
+      if (label) label.textContent = dialMode === 'hour' ? 'set minutes' : 'set hours';
+      dial.setAttribute('aria-label', `Clock face, ${dialMode} hand at ${pad(shown)}. Point to set, or use the time field.`);
     };
     const epoch = () => Math.floor(new Date(pick.y, pick.m, pick.d, pick.hh, pick.mm, 0, 0).getTime() / 1000);
     const repaintCal = () => {
@@ -405,8 +508,86 @@ function openAlarmPicker({ alarm = null, presetAt = null, tasks = [], mode = 'al
       }));
     }
     bind();
+
+    /* Clock face: point or drag. Hours first, then it flips to minutes on release,
+       which is what makes a single hand readable. */
+    const dial = $('[data-dial]', modal);
+    if (dial) {
+      let dragging = false;
+      const fromPointer = (ev) => {
+        const box = dial.querySelector('svg').getBoundingClientRect();
+        if (!box.width) return;
+        const dx = ev.clientX - (box.left + box.width / 2);
+        const dy = ev.clientY - (box.top + box.height / 2);
+        if (Math.hypot(dx, dy) < box.width * 0.14) return;   // too near the pin to read an angle
+        // 0 degrees at 12 o'clock, increasing clockwise.
+        const deg = (Math.atan2(dx, -dy) * 180 / Math.PI + 360) % 360;
+        if (dialMode === 'hour') {
+          const h = Math.round(deg / 30) % 12;
+          pick.hh = pick.hh >= 12 ? (h === 0 ? 12 : h + 12) : h;
+        } else {
+          pick.mm = Math.round(deg / 6) % 60;
+        }
+        sync();
+      };
+      dial.addEventListener('pointerdown', (ev) => {
+        if (ev.target.closest('[data-dialmode]')) return;
+        dragging = true;
+        // A synthetic or stale pointer id throws; capturing is a convenience, not a requirement.
+        try { dial.setPointerCapture?.(ev.pointerId); } catch { /* fall back to bubbling events */ }
+        dial.classList.add('is-live');
+        fromPointer(ev);
+        ev.preventDefault();
+      });
+      dial.addEventListener('pointermove', (ev) => { if (dragging) fromPointer(ev); });
+      const endDrag = () => {
+        if (!dragging) return;
+        dragging = false;
+        dial.classList.remove('is-live');
+        if (dialMode === 'hour') { dialMode = 'minute'; sync(); }
+      };
+      dial.addEventListener('pointerup', endDrag);
+      dial.addEventListener('pointercancel', endDrag);
+    }
+
+    /* Typed time, so the keyboard stays a first-class way in. */
+    const timeInput = $('[data-timeinput]', modal);
+    if (timeInput) {
+      timeInput.addEventListener('input', () => {
+        const t = parseTime(timeInput.value);
+        if (!t) {
+          timeInput.classList.toggle('is-bad', timeInput.value.trim().length >= 3);
+          return;
+        }
+        timeInput.classList.remove('is-bad');
+        pick.hh = t.hh;
+        pick.mm = t.mm;
+        // Repaint everything except the field itself, which sync() skips while focused.
+        $('[data-hhval]', modal).textContent = pad(pick.hh);
+        $('[data-mmval]', modal).textContent = pad(pick.mm);
+        paintDial();
+        const at = epoch();
+        $('[data-summary]', modal).textContent = `${hhmm(at)} · ${dayLabel(at)} · ${relLabel(at)} · ${REPEATS[pick.repeat]}`;
+      });
+      timeInput.addEventListener('keydown', (ev) => {
+        if (ev.key === 'Enter') { ev.preventDefault(); $('[data-save]', modal)?.click(); return; }
+        if (ev.key !== 'ArrowUp' && ev.key !== 'ArrowDown') return;
+        ev.preventDefault();
+        const step = ev.shiftKey ? 15 : 1;
+        pick.mm += ev.key === 'ArrowUp' ? step : -step;
+        while (pick.mm >= 60) { pick.mm -= 60; pick.hh = (pick.hh + 1) % 24; }
+        while (pick.mm < 0) { pick.mm += 60; pick.hh = (pick.hh + 23) % 24; }
+        sync();
+      });
+      timeInput.addEventListener('blur', () => {
+        timeInput.value = `${pad(pick.hh)}:${pad(pick.mm)}`;
+        timeInput.classList.remove('is-bad');
+      });
+    }
+
     modal.addEventListener('click', (e) => {
       const t = e.target;
+      if (t.closest('[data-dialmode]')) { dialMode = dialMode === 'hour' ? 'minute' : 'hour'; sync(); return; }
       const hh = t.closest('[data-hh]'), mm = t.closest('[data-mm]');
       if (hh) { pick.hh = (pick.hh + Number(hh.dataset.hh) + 24) % 24; sync(); }
       if (mm) {
@@ -447,6 +628,7 @@ function openAlarmPicker({ alarm = null, presetAt = null, tasks = [], mode = 'al
     modal.querySelector('#apLabel')?.addEventListener('input', (e) => { pick.label = e.target.value; });
 
     async function save() {
+      if (modal.closest('.modal-layer')?.nextElementSibling) return;  // another dialog is on top
       const at = epoch();
       if (mode === 'due') {
         if (onPick) onPick(at);
@@ -548,9 +730,10 @@ function openTaskEditor(task = null) {
           <div>
             <div class="card-title">Attach alarm</div>
             <div class="hint mono" data-alarmstate>none</div>
+            <div class="hint">Opens the clock and keyboard picker; the alarm is linked to this task.</div>
           </div>
           <div style="display:flex;gap:6px">
-            <button class="btn btn-tiny" data-alarm-pick><span class="mi">alarm_add</span>Pick</button>
+            <button class="btn btn-tiny" data-alarm-pick><span class="mi">alarm_add</span>Pick time</button>
             <button class="btn btn-tiny" data-alarm-clear><span class="mi">close</span>Clear</button>
           </div>
         </div>
@@ -565,6 +748,10 @@ function openTaskEditor(task = null) {
     </div>`;
 
   openModal(html, (modal, close) => {
+    // A dialog buried under another one must not act. Its buttons sit behind a scrim
+    // for a pointer, but Enter and scripted clicks still reach them. A later sibling
+    // layer was opened after this one, so it covers it.
+    const buried = () => !!modal.closest('.modal-layer')?.nextElementSibling;
     const read = () => {
       $$('[data-f]', modal).forEach((el) => {
         const k = el.dataset.f;
@@ -586,10 +773,16 @@ function openTaskEditor(task = null) {
       });
     });
     $('[data-alarm-pick]', modal).addEventListener('click', () => {
-      const d = new Date();
-      d.setHours(d.getHours() + 1, 0, 0, 0);
-      alarmAt = Math.floor(d.getTime() / 1000);
-      syncAlarm();
+      // Opens over this dialog instead of replacing it, so the draft survives the
+      // detour. Previously this silently picked the next top of hour, which read as
+      // "I cannot attach the alarm at the time I want".
+      openAlarmPicker({
+        mode: 'due',
+        title: 'Attach alarm — pick a time',
+        cta: 'Use this time',
+        presetAt: alarmAt ?? Math.floor(Date.now() / 1000) + HOUR,
+        onPick: (at) => { alarmAt = at; syncAlarm(); },
+      });
     });
     $('[data-alarm-clear]', modal).addEventListener('click', () => { alarmAt = null; syncAlarm(); });
     const syncRecur = () => {
@@ -611,6 +804,7 @@ function openTaskEditor(task = null) {
     syncRecur();
     modal.addEventListener('click', async (e) => {
       if (!e.target.closest('[data-save]')) return;
+      if (buried()) return;
       read();
       if (!draft.title.trim()) { toast('Title required', 'A task needs a title.', [], 'error'); return; }
       const input = {
@@ -742,7 +936,7 @@ function inspector(t) {
           <div class="icon-sq"><span class="mi">notifications_active</span></div>
           <div>
             <div style="display:flex;gap:8px;align-items:center">
-              <span class="card-title">Attached Chrono Alarm</span>
+              <span class="card-title">Attached Alarm</span>
               ${t.alarmId ? `<span class="tag" style="background:color-mix(in srgb,var(--tertiary-container) 45%,transparent);color:var(--tertiary)">Trigger Armed</span>` : ''}
             </div>
             <div class="card-sub ${t.alarmId ? '' : 'is-ok'}">${t.alarmId
@@ -824,7 +1018,7 @@ function viewTasks() {
       </div></div>
       <div class="pane-foot">
         <div class="hint mono"><kbd>J</kbd><kbd>K</kbd> navigate · <kbd>X</kbd> toggle · <kbd>1</kbd>–<kbd>5</kbd> views · <kbd>Ctrl</kbd><kbd>K</kbd> palette</div>
-        <span class="hint mono">Chrono Sync Engine</span>
+        <span class="hint mono">Local scheduler · 1s tick</span>
       </div>
     </section>
     ${inspector(sel)}
@@ -879,7 +1073,7 @@ function viewAlarms() {
     ${metricsBar()}
     ${S.alarms.length ? `<div class="alarm-grid">${[...armed, ...other].map(card).join('')}</div>`
       : `<div class="empty"><span class="mi">alarm</span><div class="empty-t">No alarms yet</div>
-          <div class="hint">Arm one and ChronoTask will raise a native toast at the scheduled second.</div>
+          <div class="hint">Arm one and DJ Task Manager raises a native Windows toast at the scheduled second.</div>
           <button class="btn btn-primary" data-newalarm style="margin-top:8px"><span class="mi">alarm_add</span>New Alarm</button></div>`}
   </div>`;
 }
@@ -1009,6 +1203,11 @@ function viewSettings() {
     <div><div class="opt-t">${label}</div><div class="opt-d">${desc}</div></div>
     <button class="switch ${S.settings[key] !== 'false' ? 'is-on' : ''}" data-setting="${key}" role="switch" aria-checked="${S.settings[key] !== 'false'}"></button>
   </div>`;
+  const a = S.autostart;
+  const autostartNote = !a ? 'Checking…'
+    : !a.enabled ? 'Off — alarms only fire while the app is running'
+    : a.registered ? 'Registered in Windows startup'
+    : 'On — re-registered on every launch';
   return `<div class="view view-single">
     <div class="pane-head" style="background:var(--sc-lowest)">
       <div>
@@ -1061,8 +1260,7 @@ tasks_fts(title, notes, tags) — FTS5, trigger-synced</div>
       <div class="s-block">
         <h3>Notifications &amp; Scheduling</h3>
         ${toggle('native_toasts', 'Native OS toasts', 'Windows notification centre alongside the in-app banner.')}
-        ${toggle('catch_up', 'Catch-up on launch', 'Log alarms whose time passed while ChronoTask was closed.')}
-        ${toggle('close_to_tray', 'Close button hides to tray', 'Keeps the scheduler alive; quit from the tray menu.')}
+        ${toggle('catch_up', 'Catch-up on launch', 'Log alarms whose time passed while the app was closed.')}
         <div class="opt-row">
           <div><div class="opt-t">Default snooze</div><div class="opt-d">Minutes applied to new alarms and quick snoozes.</div></div>
           <select data-snoozedefault style="width:110px">${[5, 10, 15, 30].map((m) =>
@@ -1125,9 +1323,24 @@ tasks_fts(title, notes, tags) — FTS5, trigger-synced</div>
       </div>
 
       <div class="s-block">
+        <h3>Background &amp; Startup</h3>
+        <div class="opt-row">
+          <div><div class="opt-t">Launch at sign-in</div><div class="opt-d">${autostartNote} · ${esc(a?.exePath ?? '')}</div></div>
+          <button class="switch ${a?.enabled ? 'is-on' : ''}" data-autostart role="switch" aria-checked="${!!a?.enabled}"></button>
+        </div>
+        ${toggle('start_hidden', 'Start hidden in the tray', 'Opens with no window; the scheduler still runs.')}
+        <div class="hint mono">
+          ${S.autostart?.installed
+            ? 'Installed build · Windows brands the toast as DJ Task Manager and the sticky alarm toast can offer actions.'
+            : 'Running unpackaged · Windows cannot brand the toast or route its buttons. Install the app for the full notification experience.'}
+        </div>
+        <div class="hint mono">Alarms are scheduled by a native Rust thread, so they fire whenever the app is running — window open or not.</div>
+      </div>
+
+      <div class="s-block">
         <h3>About</h3>
         <dl class="kv">
-          <dt>Build</dt><dd>ChronoTask v${esc(S.info?.version ?? '—')} · Tauri 2 / Rust</dd>
+          <dt>Build</dt><dd>DJ Task Manager v${esc(S.info?.version ?? '—')} · Tauri 2 / Rust</dd>
           <dt>Started</dt><dd>${S.info ? clockLabel(S.info.startedAt) : '—'}</dd>
           <dt>Storage</dt><dd>Local only — no network sync</dd>
         </dl>
@@ -1241,11 +1454,13 @@ async function loadCalendar() {
 }
 
 async function loadHealth() {
-  const [schema, analytics, activity] = await Promise.all([
+  const [schema, analytics, activity, autostart] = await Promise.all([
     call('schema_report'),
     call('analytics', { days: 14 }),
     call('list_activity', { limit: 30 }),
+    call('autostart_state'),
   ]);
+  if (autostart) S.autostart = autostart;
   if (schema) S.schema = schema;
   if (analytics) S.analytics = analytics;
   if (activity) S.activity = activity;
@@ -1367,10 +1582,11 @@ document.addEventListener('click', async (ev) => {
   if (alarmNew) {
     const id = Number(alarmNew.dataset.alarmnew);
     const task = S.tasks.find((x) => x.id === id);
-    openAlarmPicker({ tasks: S.tasks, presetAt: task?.dueAt ? task.dueAt - 1800 : null });
-    const modal = $('#modalHost .modal');
-    const sel = modal?.querySelector('[data-task]');
-    if (sel) sel.value = String(id);
+    openAlarmPicker({
+      tasks: S.tasks,
+      presetAt: task?.dueAt ? task.dueAt - 1800 : null,
+      presetTaskId: id,
+    });
     return;
   }
   const alarmDel = near('[data-alarmdel]');
@@ -1497,7 +1713,7 @@ document.addEventListener('click', async (ev) => {
     applyTheme(); return render();
   }
   if (near('[data-toast-test]')) {
-    const out = await call('test_notification', { title: 'ChronoTask test', body: 'Native toast delivery is working.' });
+    const out = await call('test_notification', { title: 'DJ Task Manager', body: 'Native Windows toast delivery is working.' });
     return toast('Test toast sent', out?.message ?? 'failed', [], out?.ok ? 'is-ok' : 'is-error');
   }
   if (near('[data-export]')) {
@@ -1571,6 +1787,15 @@ document.addEventListener('click', async (ev) => {
     ], 'is-missed');
     return;
   }
+  if (near('[data-autostart]')) {
+    const next = !S.autostart?.enabled;
+    const out = await call('set_autostart', { enabled: next });
+    if (out) {
+      S.autostart = out;
+      toast(out.enabled ? 'Launches at sign-in' : 'Will not start at sign-in', out.enabled ? 'The scheduler starts with Windows and sits in the tray.' : 'Start DJ Task Manager manually to resume alarms.', [], out.enabled ? 'is-ok' : 'is-missed');
+    }
+    return render();
+  }
   if (near('[data-quit]')) return call('app_quit');
 
   /* timer */
@@ -1638,7 +1863,7 @@ document.addEventListener('keydown', (ev) => {
   if ((ev.ctrlKey || ev.metaKey) && ev.key.toLowerCase() === 'k') { ev.preventDefault(); return openPalette(); }
   if ((ev.ctrlKey || ev.metaKey) && ev.key.toLowerCase() === 'n') { ev.preventDefault(); return openTaskEditor(); }
   if ((ev.ctrlKey || ev.metaKey) && ev.key.toLowerCase() === 'a') { ev.preventDefault(); return openAlarmPicker({ tasks: S.tasks }); }
-  if (ev.key === 'Escape') { $('#modalHost').innerHTML = ''; return; }
+  if (ev.key === 'Escape') { closeTopModal(); return; }
   if (typing) return;
   /* 1..5 jump between workspace views */
   const viewByDigit = { 1: 'tasks', 2: 'alarms', 3: 'calendar', 4: 'missed', 5: 'settings' };
@@ -1804,6 +2029,6 @@ async function boot() {
   }
 }
 
-window.addEventListener('error', (e) => console.error('[chronotask ui]', e.message));
+window.addEventListener('error', (e) => console.error('[dj-task-manager ui]', e.message));
 applyIcons(document);   // static chrome (title bar, sidebar, status bar) before any data lands
 boot();

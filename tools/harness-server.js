@@ -43,7 +43,7 @@ const storage = {
 const settings = { theme: 'dark', close_to_tray: 'true', native_toasts: 'true', default_snooze: '5', catch_up: 'true', compact_rows: 'false' };
 
 const handlers = {
-  app_info: () => ({ version: '2.4.1', appName: 'ChronoTask', dbPath: storage.path, dataDir: storage.dir, startedAt: now - 900, platform: 'windows', timer: { running: true, paused: false, label: 'Deep Focus #4', taskId: 2, totalSec: 1500, remainingSec: 1412 } }),
+  app_info: () => ({ version: '2.5.0', appName: 'DJ Task Manager', dbPath: storage.path, dataDir: storage.dir, startedAt: now - 900, platform: 'windows', timer: { running: true, paused: false, label: 'Deep Focus #4', taskId: 2, totalSec: 1500, remainingSec: 1412 } }),
   stats: () => ({ dueToday: 4, overdue: 1, alarmsArmed: 3, tasksOpen: 4, tasksTotal: 5, missedUnhandled: 2 }),
   storage_report: () => storage,
   list_tasks: () => tasks,
@@ -147,7 +147,10 @@ const handlers = {
   backup_database: () => ({ ok: true, message: 'C:\\backups\\chronotask.db (72 KiB)' }),
   export_csv: ({ table }) => ({ ok: true, message: `12 rows exported to C:\\backups\\chronotask-${table}.csv` }),
   prune_history: () => ({ ok: true, message: 'removed 4 alarm events and 2 activity rows older than 90d' }),
-  reset_workspace: () => ({ ok: true, message: 'cleared 26 rows; preferences kept' }),
+  reset_workspace: () => ({ ok: true, message: 'cleared 0 rows; preferences kept' }),
+  autostart_state: () => ({ enabled: true, installed: false, exePath: 'D:\\chronotask-desktop\\src-tauri\\target\\release\\dj-task-manager.exe' }),
+  set_autostart: ({ enabled }) => ({ enabled: !!enabled, installed: false, exePath: 'D:\\chronotask-desktop\\src-tauri\\target\\release\\dj-task-manager.exe' }),
+  install_state: () => ({ installed: false, identifier: 'app.djtaskmanager.desktop', productName: 'DJ Task Manager', version: '2.5.0' }),
 };
 
 

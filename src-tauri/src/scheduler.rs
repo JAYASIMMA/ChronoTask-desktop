@@ -13,7 +13,6 @@ use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tauri::{AppHandle, Emitter};
-use tauri_plugin_notification::NotificationExt;
 
 /// An alarm whose scheduled time passed more than this many seconds ago is treated as
 /// missed (catch-up log) rather than fired late.
@@ -28,6 +27,8 @@ pub struct AlarmEvent {
     pub task_id: Option<i64>,
     pub task_title: Option<String>,
     pub snooze_min: i64,
+    pub sound: String,
+    pub escalating: bool,
     /// "fired" | "missed" | "preflight"
     pub kind: String,
     /// "offline" when the slot passed before this process started.
@@ -46,12 +47,19 @@ pub fn spawn(app: AppHandle, state: Arc<AppState>) {
                 std::thread::sleep(until);
             }
             let late = Instant::now().saturating_duration_since(next).as_millis() as i64;
-            next += Duration::from_secs(1);
-            state.record_drift(late);
+            // After sleep or hibernate `next` can lag by hours. Advancing it one second at
+            // a time would spin the loop thousands of times, each doing database work, so
+            // resync the schedule and take a single catch-up tick instead.
+            if late > 2_000 {
+                next = Instant::now() + Duration::from_secs(1);
+            } else {
+                next += Duration::from_secs(1);
+            }
+            state.record_drift(late.min(2_000));
             let ticks = state.ticks.fetch_add(1, Ordering::Relaxed) + 1;
             let now = chrono::Local::now().timestamp();
             if let Err(e) = tick(&app, &state, now, ticks) {
-                eprintln!("[chronotask] scheduler tick error: {e}");
+                eprintln!("[dj-task-manager] scheduler tick error: {e}");
             }
         }
     });
@@ -61,7 +69,13 @@ pub fn spawn(app: AppHandle, state: Arc<AppState>) {
 pub fn evaluate_due(db: &Arc<Db>, now: i64, started_at: i64, grace: i64) -> Result<Vec<AlarmEvent>, String> {
     let mut events = Vec::new();
     for alarm in db.armed_alarms()? {
-        let Some(due) = next_fire_fn::compute_value(alarm.fire_at, &alarm.repeat, &alarm.days, alarm.last_fired_at) else {
+        let Some(due) = next_fire_fn::compute_value(
+            alarm.fire_at,
+            &alarm.repeat,
+            &alarm.days,
+            alarm.last_fired_at,
+            alarm.snoozed_until,
+        ) else {
             continue;
         };
         if due > now {
@@ -89,6 +103,8 @@ pub fn evaluate_due(db: &Arc<Db>, now: i64, started_at: i64, grace: i64) -> Resu
             task_id: alarm.task_id,
             task_title: alarm.task_title.clone(),
             snooze_min: alarm.snooze_min,
+            sound: alarm.sound.clone(),
+            escalating: alarm.escalate,
             kind: if missed { "missed" } else { "fired" }.to_string(),
             source,
             logged_at: now,
@@ -126,6 +142,8 @@ pub fn evaluate_preflight(db: &Arc<Db>, now: i64) -> Result<Vec<AlarmEvent>, Str
             task_id: Some(task_id),
             task_title: Some(task.title),
             snooze_min: alarm.snooze_min,
+            sound: alarm.sound.clone(),
+            escalating: false,
             kind: "preflight".to_string(),
             source: "runtime".to_string(),
             logged_at: now,
@@ -143,28 +161,25 @@ fn tick(app: &AppHandle, state: &Arc<AppState>, now: i64, ticks: i64) -> Result<
 
     for ev in events {
         let _ = app.emit("app://alarm", ev.clone());
-        if native {
-            let title = match ev.kind.as_str() {
-                "missed" => format!("Missed alarm — {}", ev.label),
-                "preflight" => format!("Heads-up — {}", ev.label),
-                _ => format!("Alarm — {}", ev.label),
-            };
-            let body = match (&ev.task_title, ev.kind.as_str()) {
-                (Some(t), "missed") => format!("Passed while you were away. Linked task: {t}"),
-                (Some(t), "preflight") => format!("{t} is due soon"),
-                (Some(t), _) => format!("Linked task: {t}"),
-                (None, "missed") => "It was due while ChronoTask was closed.".to_string(),
-                (None, _) => "Open ChronoTask to snooze or dismiss.".to_string(),
-            };
-            let sound = if ev.label.eq_ignore_ascii_case("silent") { None } else { Some("default") };
-            let mut b = app.notification().builder().title(&title).body(&body);
-            if let Some(s) = sound {
-                b = b.sound(s);
-            }
-            if let Err(e) = b.show() {
-                eprintln!("[chronotask] notification failed: {e}");
-            }
+        if !native {
+            continue;
         }
+        let title = match ev.kind.as_str() {
+            "missed" => format!("Missed alarm - {}", ev.label),
+            "preflight" => format!("Heads-up - {}", ev.label),
+            _ => format!("Alarm - {}", ev.label),
+        };
+        let body = match (&ev.task_title, ev.kind.as_str()) {
+            (Some(t), "missed") => format!("Passed while you were away. Linked task: {t}"),
+            (Some(t), "preflight") => format!("{t} is due soon"),
+            (Some(t), _) => format!("Linked task: {t}"),
+            (None, "missed") => "It was due while DJ Task Manager was closed.".to_string(),
+            (None, _) => "Open DJ Task Manager to snooze or dismiss.".to_string(),
+        };
+        // A live alarm gets the sticky, looping alarm toast; a catch-up entry is a plain
+        // reminder, because demanding attention for the past is just noise.
+        let sticky = ev.kind == "fired";
+        crate::notify::notify(app, &title, &body, &ev.sound, ev.escalating, sticky, Some(ev.id));
     }
 
     let snapshot = {
@@ -186,13 +201,15 @@ fn tick(app: &AppHandle, state: &Arc<AppState>, now: i64, ticks: i64) -> Result<
         let snap = state.snapshot_timer();
         if let Some(label) = done {
             if native {
-                let _ = app
-                    .notification()
-                    .builder()
-                    .title("Timer finished")
-                    .body(format!("“{label}” is complete."))
-                    .sound("default")
-                    .show();
+                crate::notify::notify(
+                    app,
+                    "Focus timer finished",
+                    &format!("{label} is complete."),
+                    "chime",
+                    false,
+                    false,
+                    None,
+                );
             }
             let _ = app.emit("app://timer-done", label);
         }

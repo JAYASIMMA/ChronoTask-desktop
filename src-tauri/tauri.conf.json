@@ -1,8 +1,8 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "ChronoTask",
-  "version": "2.4.1",
-  "identifier": "app.chronotask.desktop",
+  "productName": "DJ Task Manager",
+  "version": "2.6.0",
+  "identifier": "app.djtaskmanager.desktop",
   "build": {
     "frontendDist": "../ui"
   },
@@ -11,7 +11,7 @@
     "windows": [
       {
         "label": "main",
-        "title": "ChronoTask — Tasks & Alarms",
+        "title": "DJ Task Manager — Tasks & Alarms",
         "width": 1440,
         "height": 900,
         "minWidth": 1080,
@@ -19,7 +19,8 @@
         "center": true,
         "resizable": true,
         "theme": "Dark",
-        "backgroundColor": "#111317"
+        "backgroundColor": "#0d0f14",
+        "windowEffects": { "effects": ["blur"] }
       }
     ],
     "security": {
@@ -28,13 +29,27 @@
   },
   "bundle": {
     "active": true,
-    "targets": ["nsis", "msi"],
-    "publisher": "ChronoTask",
-    "copyright": "© 2026 ChronoTask",
+    "targets": ["nsis"],
+    "publisher": "DJ",
+    "copyright": "© 2026 DJ Task Manager",
     "category": "Productivity",
+    "shortDescription": "Tasks, alarms and catch-up reminders that keep running from the tray.",
+    "longDescription": "DJ Task Manager is an offline desktop task and alarm manager. Alarms are scheduled by a native Rust thread over a local SQLite database, so reminders keep firing from the system tray even when the window is closed.",
     "icon": ["icons/icon.ico", "icons/icon.png", "icons/32x32.png"],
     "windows": {
-      "webviewInstallMode": { "type": "downloadBootstrapper" }
+      "webviewInstallMode": {
+        "type": "embedBootstrapper",
+        "silent": true
+      },
+      "nsis": {
+        "installMode": "currentUser",
+        "startMenuFolder": "DJ Task Manager",
+        "languages": ["English"],
+        "displayLanguageSelector": false,
+        "installerIcon": "icons/icon.ico",
+        "uninstallerIcon": "icons/icon.ico",
+        "compression": "lzma"
+      }
     }
   }
 }

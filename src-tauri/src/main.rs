@@ -1,5 +1,5 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 fn main() {
-    chronotask_lib::run();
+    dj_task_manager_lib::run();
 }

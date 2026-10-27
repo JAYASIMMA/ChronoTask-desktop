@@ -1,10 +1,10 @@
 //! Backend integration tests: every case runs against a real SQLite file in a scratch
 //! directory, exercising migrations, the query layer, the scheduler's decision logic,
 //! and the maintenance commands.
-use chronotask_lib::db::migrations::TARGET_VERSION;
-use chronotask_lib::db::next_fire_fn;
-use chronotask_lib::db::{AlarmInput, Db, TaskInput};
-use chronotask_lib::scheduler;
+use dj_task_manager_lib::db::migrations::TARGET_VERSION;
+use dj_task_manager_lib::db::next_fire_fn;
+use dj_task_manager_lib::db::{AlarmInput, Db, TaskInput};
+use dj_task_manager_lib::scheduler;
 use chrono::{Datelike, Local, TimeZone};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -28,6 +28,17 @@ fn noon_today() -> i64 {
     at(now.year(), now.month(), now.day(), 12, 0)
 }
 
+fn scratch_dir(name: &str) -> PathBuf {
+    let mut dir = std::env::temp_dir();
+    dir.push(format!("djtm-{name}-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    dir
+}
+
+fn cleanup(dir: PathBuf) {
+    let _ = std::fs::remove_dir_all(dir);
+}
+
 struct Scratch {
     dir: PathBuf,
     db: Arc<Db>,
@@ -36,7 +47,7 @@ struct Scratch {
 impl Scratch {
     fn new(name: &str) -> Scratch {
         let mut dir = std::env::temp_dir();
-        dir.push(format!("chronotask-test-{}-{name}", std::process::id()));
+        dir.push(format!("djtm-test-{}-{name}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).expect("create scratch dir");
         let db = Db::open_scratch(&dir, "scratch.db").expect("open scratch db");
@@ -54,7 +65,7 @@ impl Drop for Scratch {
     }
 }
 
-fn task(db: &Db, title: &str, due: Option<i64>) -> chronotask_lib::db::Task {
+fn task(db: &Db, title: &str, due: Option<i64>) -> dj_task_manager_lib::db::Task {
     db.save_task(&TaskInput {
         title: title.into(),
         due_at: due,
@@ -63,7 +74,7 @@ fn task(db: &Db, title: &str, due: Option<i64>) -> chronotask_lib::db::Task {
     .expect("save_task")
 }
 
-fn alarm(db: &Db, label: &str, fire_at: i64, repeat: &str) -> chronotask_lib::db::Alarm {
+fn alarm(db: &Db, label: &str, fire_at: i64, repeat: &str) -> dj_task_manager_lib::db::Alarm {
     db.save_alarm(&AlarmInput {
         label: label.into(),
         fire_at,
@@ -496,7 +507,7 @@ fn alarm_history_records_the_lifecycle() {
         .into_iter()
         .map(|e| e.event)
         .collect();
-    for expected in ["armed", "fired", "snoozed", "disabled"] {
+    for expected in ["armed", "fired", "snoozed", "deleted"] {
         assert!(events.contains(&expected.to_string()), "missing {expected} in {events:?}");
     }
 }
@@ -507,22 +518,32 @@ fn next_fire_rules_are_anchored_on_last_fired() {
     assert_eq!(Local.timestamp_opt(monday, 0).single().unwrap().weekday().to_string(), "Mon");
 
     // One-off: the slot itself, even in the past.
-    assert_eq!(next_fire_fn::compute_value(monday, "none", &[], None), Some(monday));
+    assert_eq!(next_fire_fn::compute_value(monday, "none", &[], None, None), Some(monday));
     // Daily, never fired: its own slot.
-    assert_eq!(next_fire_fn::compute_value(monday, "daily", &[], None), Some(monday));
+    assert_eq!(next_fire_fn::compute_value(monday, "daily", &[], None, None), Some(monday));
     // Daily, already fired: tomorrow.
-    assert_eq!(next_fire_fn::compute_value(monday, "daily", &[], Some(monday)), Some(monday + DAY));
+    assert_eq!(next_fire_fn::compute_value(monday, "daily", &[], Some(monday), None), Some(monday + DAY));
     // Weekdays from Friday: skips the weekend to Monday.
     let friday = at(2026, 10, 30, 9, 45);
     assert_eq!(
-        next_fire_fn::compute_value(friday, "weekdays", &[], Some(friday)),
+        next_fire_fn::compute_value(friday, "weekdays", &[], Some(friday), None),
         Some(friday + 3 * DAY)
     );
     // Weekly with a Thursday mask from a Monday.
     let thursday = at(2026, 10, 29, 9, 45);
-    assert_eq!(next_fire_fn::compute_value(monday, "weekly", &[3], None), Some(thursday));
+    assert_eq!(next_fire_fn::compute_value(monday, "weekly", &[3], None, None), Some(thursday));
     // Unknown repeat falls back to the raw slot rather than dropping the alarm.
-    assert_eq!(next_fire_fn::compute_value(monday, "monthly", &[], None), Some(monday));
+    assert_eq!(next_fire_fn::compute_value(monday, "monthly", &[], None, None), Some(monday));
+    // A pending snooze wins when it is later than the schedule...
+    assert_eq!(
+        next_fire_fn::compute_value(monday, "daily", &[], None, Some(monday + 2 * HOUR)),
+        Some(monday + 2 * HOUR)
+    );
+    // ...but never pulls an already-later slot backwards.
+    assert_eq!(
+        next_fire_fn::compute_value(monday, "daily", &[], Some(monday), Some(monday - HOUR)),
+        Some(monday + DAY)
+    );
 }
 
 #[test]
@@ -742,10 +763,139 @@ fn cascade_delete_removes_children() {
 }
 
 #[test]
-fn seeded_database_opens_ready_to_use() {
-    let s = Scratch::new("seed");
-    let db = Db::open(s.path()).expect("first-run database should open");
-    assert!(db.list_tasks("", "").unwrap().len() >= 5, "first run should be populated");
-    assert!(!db.list_alarms().unwrap().is_empty());
-    assert!(db.get_setting("theme").is_some());
+fn a_fresh_database_starts_empty_but_preferences_exist() {
+    // The demo workspace is gone: a new install must not ship with someone else's tasks.
+    let dir = scratch_dir("empty");
+    let db = dj_task_manager_lib::db::Db::open(&dir).expect("open app db");
+    assert!(db.list_tasks("", "").unwrap().is_empty(), "no tasks should be pre-seeded");
+    assert!(db.list_alarms().unwrap().is_empty(), "no alarms should be pre-seeded");
+    assert!(db.list_missed(false).unwrap().is_empty());
+    assert!(db.list_activity(None, 10).unwrap().is_empty());
+    // Preferences do have defaults, so the toggles read back real values.
+    assert_eq!(db.get_setting("theme").as_deref(), Some("dark"));
+    assert_eq!(db.get_setting("autostart").as_deref(), Some("true"));
+    assert_eq!(db.stats().unwrap().tasks_total, 0);
+    let report = db.storage_report().unwrap();
+    assert_eq!(report["rowCounts"]["tasks"], serde_json::json!(0));
+    cleanup(dir);
+}
+
+#[test]
+fn snoozing_a_recurring_alarm_keeps_its_daily_slot() {
+    // Regression: snooze used to rewrite fire_at, so snoozing a 09:45 standup in the
+    // evening moved every future standup to that new time, permanently.
+    let s = Scratch::new("snooze-schedule");
+    let now = chrono::Local::now().timestamp();
+    let slot = now - HOUR; // a daily alarm whose slot passed an hour ago
+    let a = alarm(&s.db, "Standup sync", slot, "daily");
+
+    let snoozed = s.db.snooze_alarm(a.id, 45).unwrap();
+    assert_eq!(snoozed.fire_at, slot, "the recurring slot must be untouched");
+    assert_eq!(snoozed.snoozed_until, Some(now + 45 * MIN), "suppression is a separate window");
+    assert!(snoozed.next_fire_at.unwrap() > now, "and it must not be due yet");
+    assert_eq!(snoozed.snooze_count, 1);
+
+    // Half an hour later the snooze is still holding it back.
+    let early = scheduler::evaluate_due(&s.db, now + 30 * MIN, now, scheduler::GRACE_SECONDS).unwrap();
+    assert!(early.iter().all(|e| e.id != a.id), "a pending snooze must hold the alarm back");
+
+    // Past the window it fires once, and the schedule is still where it was set.
+    let due = scheduler::evaluate_due(&s.db, now + 46 * MIN, now, scheduler::GRACE_SECONDS).unwrap();
+    assert_eq!(due.len(), 1, "the alarm should come due once the window passes");
+    assert_eq!(due[0].kind, "fired", "it fires promptly, so it is not a miss");
+
+    let after = s.db.alarm_by_id(a.id).unwrap();
+    assert_eq!(after.fire_at, slot, "firing must not move the stored slot either");
+    assert_eq!(after.snoozed_until, None, "consuming the snooze clears it");
+    assert!(after.next_fire_at.unwrap() > now + 46 * MIN, "and it rolls to the next day");
+}
+
+#[test]
+fn snoozing_a_one_off_alarm_does_move_its_slot() {
+    let s = Scratch::new("snooze-oneoff");
+    let now = chrono::Local::now().timestamp();
+    let a = alarm(&s.db, "Code freeze", now - 60, "none");
+    let after = s.db.snooze_alarm(a.id, 15).unwrap();
+    assert!(after.fire_at >= now + 15 * 60 - 5, "a one-off reschedules");
+    assert_eq!(after.snoozed_until, None, "one-offs use fire_at, not the suppression window");
+    assert_eq!(after.state, "armed");
+}
+
+#[test]
+fn firing_clears_the_snooze_window() {
+    let s = Scratch::new("snooze-clear");
+    let now = chrono::Local::now().timestamp();
+    let a = alarm(&s.db, "Daily standup", now - 30, "daily");
+    s.db.snooze_alarm(a.id, 5).unwrap();
+    assert!(s.db.alarm_by_id(a.id).unwrap().snoozed_until.is_some());
+
+    let fire_at = now + 6 * 60;
+    let events = scheduler::evaluate_due(&s.db, fire_at, fire_at, scheduler::GRACE_SECONDS).unwrap();
+    assert_eq!(events.len(), 1, "the snoozed alarm should come due once the window passes");
+    let after = s.db.alarm_by_id(a.id).unwrap();
+    assert_eq!(after.snoozed_until, None, "consuming the snooze must clear it");
+    assert_eq!(after.fire_at, a.fire_at, "and the schedule stays where it was set");
+}
+
+#[test]
+fn deleting_a_task_disarms_the_alarm_attached_to_it() {
+    let s = Scratch::new("disarm");
+    let task = s
+        .db
+        .save_task(&TaskInput {
+            title: "Ship the release".into(),
+            ..Default::default()
+        })
+        .unwrap();
+    let attached = s
+        .db
+        .save_alarm(&AlarmInput {
+            label: "Reminder: Ship the release".into(),
+            fire_at: noon_today() + HOUR,
+            task_id: Some(task.id),
+            ..Default::default()
+        })
+        .unwrap();
+    let standalone = s
+        .db
+        .save_alarm(&AlarmInput {
+            label: "Standup".into(),
+            fire_at: noon_today(),
+            repeat: "weekdays".into(),
+            ..Default::default()
+        })
+        .unwrap();
+
+    s.db.delete_task(task.id).unwrap();
+
+    // No ghost alarms: the reminder must stop firing once its task is gone...
+    let armed: Vec<i64> = s
+        .db
+        .armed_alarms()
+        .unwrap()
+        .into_iter()
+        .map(|a| a.id)
+        .collect();
+    assert!(
+        !armed.contains(&attached.id),
+        "an alarm left pointing at a deleted task must not stay armed"
+    );
+    // ...but it is disarmed, not destroyed, and nothing else is touched.
+    let after = s.db.alarm_by_id(attached.id).unwrap();
+    assert_eq!(after.state, "paused", "the reminder survives as a paused alarm");
+    assert_eq!(after.task_id, None, "and it is detached from the task that went away");
+    assert_eq!(
+        s.db.alarm_by_id(standalone.id).unwrap().state,
+        standalone.state,
+        "an alarm with no task must never be collateral damage"
+    );
+
+    let history = s.db.list_alarm_history(None, 50).unwrap();
+    assert!(
+        history
+            .iter()
+            .any(|h| h.event == "paused" && h.label == attached.label && h.note == "task removed"),
+        "the disarm has to be auditable, got {:?}",
+        history.iter().map(|h| (&h.event, &h.label)).collect::<Vec<_>>()
+    );
 }

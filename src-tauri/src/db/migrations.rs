@@ -6,7 +6,7 @@
 use rusqlite::{params, Connection};
 
 /// The schema version this build expects. `analytics::schema_report()` surfaces it.
-pub const TARGET_VERSION: i64 = 3;
+pub const TARGET_VERSION: i64 = 4;
 
 struct Migration {
     version: i64,
@@ -18,6 +18,7 @@ const MIGRATIONS: &[Migration] = &[
     Migration { version: 1, name: "baseline", apply: baseline },
     Migration { version: 2, name: "alarm-policy-and-recurrence", apply: alarm_policy_and_recurrence },
     Migration { version: 3, name: "history-and-fts", apply: history_and_fts },
+    Migration { version: 4, name: "snooze-window", apply: snooze_window },
 ];
 
 pub fn current(conn: &Connection) -> i64 {
@@ -226,4 +227,14 @@ fn history_and_fts(conn: &Connection) -> Result<(), String> {
         conn.execute_batch(sql).map_err(|e| format!("trigger: {e}"))?;
     }
     Ok(())
+}
+
+/// v4 — a snooze must not rewrite an alarm's schedule.
+///
+/// Moving `fire_at` is fine for a one-off, but for a daily or weekly alarm it silently
+/// relocates the recurring slot forever: snooze a 09:45 standup at 18:00 and every
+/// future standup becomes 18:05. `snoozed_until` suppresses the alarm until a moment in
+/// time while leaving the underlying schedule untouched.
+fn snooze_window(conn: &Connection) -> Result<(), String> {
+    add_column(conn, "alarms", "snoozed_until", "INTEGER")
 }

@@ -1,8 +1,9 @@
-//! ChronoTask — desktop task & alarm manager.
+//! DJ Task Manager — desktop task & alarm manager.
 //! Rust owns persistence (SQLite), the alarm scheduler thread, and native toasts;
 //! the WebView window renders the UI and talks to it over `invoke`.
 mod commands;
 pub mod db;
+pub mod notify;
 pub mod scheduler;
 pub mod state;
 
@@ -12,26 +13,86 @@ use std::sync::Arc;
 use tauri::menu::{Menu, MenuItem, PredefinedMenuItem};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
 use tauri::{AppHandle, Emitter, Manager};
-use tauri_plugin_notification::NotificationExt;
+use tauri_plugin_autostart::ManagerExt;
+
+/// Pass `--reset-data` to clear every task, alarm and log row and exit. Preferences are
+/// kept. Handy from a terminal when the window is not open.
+fn handle_cli_flags(app_dir: &std::path::Path) {
+    if !std::env::args().any(|a| a == "--reset-data") {
+        return;
+    }
+    match Db::open(app_dir) {
+        Ok(db) => match db.reset_workspace() {
+            Ok(removed) => {
+                println!("DJ Task Manager: workspace cleared -> {removed:?}");
+                println!("Preferences were kept.");
+            }
+            Err(e) => {
+                eprintln!("DJ Task Manager: reset failed: {e}");
+                std::process::exit(1);
+            }
+        },
+        Err(e) => {
+            eprintln!("DJ Task Manager: cannot open database: {e}");
+            std::process::exit(1);
+        }
+    }
+    std::process::exit(0);
+}
 
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_dialog::init())
+        // Relaunches with `--minimized` so a background start never flashes a window.
+        .plugin(tauri_plugin_autostart::init(
+            tauri_plugin_autostart::MacosLauncher::LaunchAgent,
+            Some(vec!["--minimized"]),
+        ))
         .setup(|app| {
-            let data_dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
+            let handle = app.handle().clone();
+
+            // Claim the Windows AppUserModelID before anything can raise a toast.
+            notify::init_identity(&handle);
+
+            let data_dir = handle.path().app_data_dir().map_err(|e| e.to_string())?;
+            handle_cli_flags(&data_dir);
+
             let db = Db::open(&data_dir).map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
             let state = Arc::new(AppState::new(Arc::new(db), data_dir));
-            app.manage(state.clone());
+            handle.manage(state.clone());
 
-            build_tray(app.handle())?;
-            scheduler::spawn(app.handle().clone(), state.clone());
+            build_tray(&handle)?;
+            scheduler::spawn(handle.clone(), state.clone());
+
+            // Honour the stored preference on every launch, so installing the app once is
+            // enough to keep the scheduler alive at sign-in. Applied in both directions:
+            // a user who turned it off stays off even though the default is on.
+            let autostart = handle.autolaunch();
+            let want_autostart = commands::autostart_wanted(&state.db);
+            let applied = if want_autostart {
+                autostart.enable()
+            } else {
+                autostart.disable()
+            };
+            if let Err(e) = applied {
+                eprintln!("[dj-task-manager] could not sync sign-in launch with the preference: {e}");
+            }
+
+            // Started from the tray at sign-in: stay out of the way.
+            let hidden_at_start = std::env::args().any(|a| a == "--minimized")
+                || state.db.get_setting("start_hidden").map(|v| v == "true").unwrap_or(false);
+            if hidden_at_start {
+                if let Some(w) = handle.get_webview_window("main") {
+                    let _ = w.hide();
+                }
+            }
 
             // Tell the UI the scheduler is live as soon as the webview is ready.
-            let handle = app.handle().clone();
+            let ready = handle.clone();
             std::thread::spawn(move || {
                 std::thread::sleep(std::time::Duration::from_millis(900));
-                let _ = handle.emit("app://ready", ());
+                let _ = ready.emit("app://ready", ());
             });
             Ok(())
         })
@@ -47,13 +108,15 @@ pub fn run() {
                 if keep && window.label() == "main" {
                     api.prevent_close();
                     let _ = window.hide();
-                    let _ = window
-                        .app_handle()
-                        .notification()
-                        .builder()
-                        .title("ChronoTask still running")
-                        .body("Alarms keep firing from the tray. Quit from the tray menu to stop them.")
-                        .show();
+                    notify::notify(
+                        &window.app_handle().clone(),
+                        "DJ Task Manager is still running",
+                        "Alarms keep firing from the tray. Quit from the tray menu to stop them.",
+                        "silent",
+                        false,
+                        false,
+                        None,
+                    );
                 }
             }
         })
@@ -107,13 +170,16 @@ pub fn run() {
             commands::db_checkpoint,
             commands::backup_database,
             commands::export_csv,
+            commands::autostart_state,
+            commands::set_autostart,
+            commands::install_state,
         ])
         .run(tauri::generate_context!())
-        .expect("ChronoTask failed to start");
+        .expect("DJ Task Manager failed to start");
 }
 
 fn build_tray(app: &AppHandle) -> tauri::Result<()> {
-    let show = MenuItem::with_id(app, "tray-show", "Open ChronoTask", true, None::<&str>)?;
+    let show = MenuItem::with_id(app, "tray-show", "Open DJ Task Manager", true, None::<&str>)?;
     let hide = MenuItem::with_id(app, "tray-hide", "Hide Window", true, None::<&str>)?;
     let sep = PredefinedMenuItem::separator(app)?;
     let quit = MenuItem::with_id(app, "tray-quit", "Quit (stops alarms)", true, None::<&str>)?;
@@ -121,10 +187,10 @@ fn build_tray(app: &AppHandle) -> tauri::Result<()> {
 
     let icon = app.default_window_icon().cloned();
 
-    let mut builder = TrayIconBuilder::with_id("chronotask-tray")
+    let mut builder = TrayIconBuilder::with_id("djtaskmanager-tray")
         .menu(&menu)
         .show_menu_on_left_click(false)
-        .tooltip("ChronoTask — scheduler active")
+        .tooltip("DJ Task Manager — scheduler active")
         .on_menu_event(|app, event| match event.id.as_ref() {
             "tray-show" => {
                 if let Some(w) = app.get_webview_window("main") {

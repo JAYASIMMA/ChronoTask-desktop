@@ -5,8 +5,8 @@ use crate::db::{AlarmInput, Db, TaskInput};
 use crate::state::{AppState, TimerState};
 use std::sync::Arc;
 use tauri::{AppHandle, Manager};
+use tauri_plugin_autostart::ManagerExt;
 use tauri_plugin_dialog::DialogExt;
-use tauri_plugin_notification::NotificationExt;
 
 #[derive(serde::Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -38,7 +38,7 @@ pub fn app_info(app: AppHandle) -> AppInfo {
     let s = state(&app);
     AppInfo {
         version: env!("CARGO_PKG_VERSION"),
-        app_name: "ChronoTask",
+        app_name: "DJ Task Manager",
         db_path: s.db.path.to_string_lossy().to_string(),
         data_dir: s.app_dir.to_string_lossy().to_string(),
         started_at: s.started_at,
@@ -162,26 +162,43 @@ pub fn snooze_alarm(app: AppHandle, id: i64, minutes: i64) -> Result<crate::db::
     state(&app).db.snooze_alarm(id, minutes)
 }
 
-/// Moves an alarm a few seconds into the future so the "Test Notification" button
-/// exercises the real scheduler and the real OS toast path.
+/// Delivers the toast an alarm would raise, without touching the alarm.
+///
+/// The earlier version rescheduled the alarm a few seconds into the future, which for a
+/// recurring alarm silently rewrote its daily slot — testing should never cost you data.
 #[tauri::command]
-pub fn test_alarm(app: AppHandle, id: i64) -> Result<crate::db::Alarm, String> {
-    state(&app).db.fire_now_offset(id, 3)
+pub fn test_alarm(app: AppHandle, id: i64) -> Result<WriteResult, String> {
+    let s = state(&app);
+    let alarm = s.db.alarm_by_id(id)?;
+    crate::notify::notify(
+        &app,
+        &format!("Alarm - {}", alarm.label),
+        &format!(
+            "Test delivery at {} ({})",
+            crate::db::epoch_hhmm(alarm.fire_at),
+            if alarm.next_fire_at.is_some() { "armed" } else { &alarm.state }
+        ),
+        &alarm.sound,
+        alarm.escalate,
+        true,
+        Some(alarm.id),
+    );
+    let _ = s.db.record_alarm_event(Some(alarm.id), &alarm.label, "fired", alarm.fire_at, "manual test");
+    Ok(WriteResult { ok: true, message: format!("delivered a test toast for '{}'", alarm.label) })
 }
 
 #[tauri::command]
 pub fn test_notification(app: AppHandle, title: Option<String>, body: Option<String>) -> WriteResult {
-    let r = app
-        .notification()
-        .builder()
-        .title(title.unwrap_or_else(|| "ChronoTask test".into()))
-        .body(body.unwrap_or_else(|| "Native toast delivery is working.".into()))
-        .sound("default")
-        .show();
-    match r {
-        Ok(_) => WriteResult { ok: true, message: "notification handed to Windows".into() },
-        Err(e) => WriteResult { ok: false, message: e.to_string() },
-    }
+    crate::notify::notify(
+        &app,
+        &title.unwrap_or_else(|| "DJ Task Manager".into()),
+        &body.unwrap_or_else(|| "Native Windows toast delivery is working.".into()),
+        "chime",
+        false,
+        false,
+        None,
+    );
+    WriteResult { ok: true, message: "toast delivered (sticky alarm style)".into() }
 }
 
 // -- missed / catch-up -----------------------------------------------------
@@ -366,8 +383,8 @@ pub async fn export_snapshot(app: AppHandle) -> Result<WriteResult, String> {
     let picked = app
         .dialog()
         .file()
-        .set_file_name(format!("chronotask-backup-{stamp}.json"))
-        .add_filter("ChronoTask snapshot", &["json"])
+        .set_file_name(format!("djtaskmanager-backup-{stamp}.json"))
+        .add_filter("DJ Task Manager snapshot", &["json"])
         .blocking_save_file();
     let Some(path) = picked.and_then(|p| p.into_path().ok()) else {
         return Ok(WriteResult { ok: false, message: "export cancelled".into() });
@@ -385,7 +402,7 @@ pub async fn import_snapshot(app: AppHandle) -> Result<WriteResult, String> {
     let picked = app
         .dialog()
         .file()
-        .add_filter("ChronoTask snapshot", &["json"])
+        .add_filter("DJ Task Manager snapshot", &["json"])
         .blocking_pick_file();
     let Some(path) = picked.and_then(|p| p.into_path().ok()) else {
         return Ok(WriteResult { ok: false, message: "import cancelled".into() });
@@ -498,7 +515,7 @@ pub async fn backup_database(app: AppHandle) -> Result<WriteResult, String> {
     let picked = app
         .dialog()
         .file()
-        .set_file_name(format!("chronotask-{stamp}.db"))
+        .set_file_name(format!("djtaskmanager-{stamp}.db"))
         .add_filter("SQLite database", &["db"])
         .blocking_save_file();
     let Some(path) = picked.and_then(|p| p.into_path().ok()) else {
@@ -518,7 +535,7 @@ pub async fn export_csv(app: AppHandle, table: String) -> Result<WriteResult, St
     let picked = app
         .dialog()
         .file()
-        .set_file_name(format!("chronotask-{table}.csv"))
+        .set_file_name(format!("djtaskmanager-{table}.csv"))
         .add_filter("CSV", &["csv"])
         .blocking_save_file();
     let Some(path) = picked.and_then(|p| p.into_path().ok()) else {
@@ -527,4 +544,73 @@ pub async fn export_csv(app: AppHandle, table: String) -> Result<WriteResult, St
     // Excel on Windows needs the BOM to read UTF-8 correctly.
     std::fs::write(&path, format!("\u{feff}{csv}")).map_err(|e| format!("write failed: {e}"))?;
     Ok(WriteResult { ok: true, message: format!("{} rows exported to {}", csv.lines().count().saturating_sub(1), path.display()) })
+}
+
+// -- background operation --------------------------------------------------
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AutostartInfo {
+    /// The user's stored preference — the value the switch reflects.
+    pub enabled: bool,
+    /// What the launch-registry entry itself claims. Only used to warn when the two
+    /// disagree, never to drive the switch: the underlying check compares the stored
+    /// command line against the current one, so launching with an extra flag makes it
+    /// report `false` for an entry that is genuinely there.
+    pub registered: bool,
+    /// Whether the app is running from an installed location. Windows only brands a
+    /// toast when a Start Menu shortcut registers the AppUserModelID, which the NSIS
+    /// installer creates — so this tells the UI whether to promise branded alerts.
+    pub installed: bool,
+    pub exe_path: String,
+}
+
+fn looks_installed() -> bool {
+    let Ok(exe) = std::env::current_exe() else { return false };
+    let text = exe.display().to_string();
+    let sep = std::path::MAIN_SEPARATOR;
+    let dev = |tail: &str| text.ends_with(&format!("target{sep}{tail}"));
+    !(dev("debug") || dev("release"))
+}
+
+/// The stored launch-at-sign-in preference. Absent means on, because a fresh install
+/// that never schedules itself is an alarm manager that silently stops working.
+pub fn autostart_wanted(db: &crate::db::Db) -> bool {
+    db.get_setting("autostart")
+        .map(|v| v != "false")
+        .unwrap_or(true)
+}
+
+#[tauri::command]
+pub fn autostart_state(app: AppHandle) -> Result<AutostartInfo, String> {
+    let st = state(&app);
+    let enabled = autostart_wanted(&st.db);
+    let registered = app.autolaunch().is_enabled().unwrap_or(false);
+    Ok(AutostartInfo {
+        enabled,
+        registered,
+        installed: looks_installed(),
+        exe_path: std::env::current_exe().map(|p| p.display().to_string()).unwrap_or_default(),
+    })
+}
+
+#[tauri::command]
+pub fn set_autostart(app: AppHandle, enabled: bool) -> Result<AutostartInfo, String> {
+    if enabled {
+        app.autolaunch().enable().map_err(|e| e.to_string())?;
+    } else {
+        app.autolaunch().disable().map_err(|e| e.to_string())?;
+    }
+    state(&app).db.set_setting("autostart", if enabled { "true" } else { "false" })?;
+    autostart_state(app)
+}
+
+#[tauri::command]
+pub fn install_state(app: AppHandle) -> serde_json::Value {
+    serde_json::json!({
+        "installed": looks_installed(),
+        "identifier": app.config().identifier.clone(),
+        "productName": app.config().product_name.clone().unwrap_or_default(),
+        "version": app.package_info().version.to_string(),
+    })
 }

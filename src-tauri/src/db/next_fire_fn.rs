@@ -1,25 +1,33 @@
 //! Next-fire computation shared by the SQL layer and the scheduler thread.
 //!
-//! Registered as the SQLite scalar function `next_fire(fire_at, repeat, days_json, last_fired_at)`
-//! so list queries and the tick loop always agree on when an alarm is due.
+//! Registered as the SQLite scalar function
+//! `next_fire(fire_at, repeat, days_json, last_fired_at, snoozed_until)` so list queries
+//! and the tick loop always agree on when an alarm is due.
 //!
-//! The rule is anchored on `last_fired_at`, never on the wall clock: the first
-//! occurrence strictly after the last one already handled. Anchoring on "now" instead
-//! makes a recurring alarm un-fireable — its slot is always rolled past the current
-//! second, so the scheduler's `due <= now` test never becomes true.
+//! Two rules matter:
+//! 1. The search is anchored on `last_fired_at`, never on the wall clock. Anchoring on
+//!    "now" makes a recurring alarm un-fireable — its slot is always rolled past the
+//!    current second, so the scheduler's `due <= now` test never becomes true.
+//! 2. A snooze only suppresses; it never moves the schedule. `snoozed_until` raises the
+//!    floor so a snoozed daily alarm wakes at the snooze moment but keeps its slot.
 use chrono::{Datelike, Days, Local, NaiveTime, TimeZone};
 use rusqlite::{functions::FunctionFlags, Connection};
 
 use crate::db::recurrence::resolve;
 
-pub fn compute(fire_at: i64, repeat: &str, days_json: &str, last_fired_at: Option<i64>) -> Option<i64> {
-    match repeat {
+pub fn compute(
+    fire_at: i64,
+    repeat: &str,
+    days_json: &str,
+    last_fired_at: Option<i64>,
+    snoozed_until: Option<i64>,
+) -> Option<i64> {
+    let base = match repeat {
         // A one-off alarm stays due until it is dismissed or snoozed.
-        "none" | "" => Some(fire_at),
-        "daily" => time_of(fire_at).map(|t| next_occurrence(t, None, anchor(fire_at, last_fired_at))),
-        "weekdays" => time_of(fire_at).map(|t| {
-            next_occurrence(t, Some(vec![0, 1, 2, 3, 4]), anchor(fire_at, last_fired_at))
-        }),
+        "none" | "" => fire_at,
+        "daily" => time_of(fire_at).map(|t| next_occurrence(t, None, anchor(fire_at, last_fired_at)))?,
+        "weekdays" => time_of(fire_at)
+            .map(|t| next_occurrence(t, Some(vec![0, 1, 2, 3, 4]), anchor(fire_at, last_fired_at)))?,
         "weekly" => {
             let days: Vec<u32> = serde_json::from_str(days_json).unwrap_or_default();
             let days = if days.is_empty() {
@@ -27,10 +35,12 @@ pub fn compute(fire_at: i64, repeat: &str, days_json: &str, last_fired_at: Optio
             } else {
                 days
             };
-            time_of(fire_at).map(|t| next_occurrence(t, Some(days), anchor(fire_at, last_fired_at)))
+            time_of(fire_at).map(|t| next_occurrence(t, Some(days), anchor(fire_at, last_fired_at)))?
         }
-        _ => Some(fire_at),
-    }
+        _ => fire_at,
+    };
+    // A pending snooze wins over the schedule, but does not replace it.
+    Some(snoozed_until.map_or(base, |s| base.max(s)))
 }
 
 /// Nothing handled yet => the alarm's own slot is the first candidate.
@@ -69,31 +79,39 @@ fn next_occurrence(time: NaiveTime, days: Option<Vec<u32>>, after: i64) -> i64 {
     after + 86_400
 }
 
+/// Convenience for callers holding parsed values (`days`: 0 = Monday .. 6 = Sunday).
+pub fn compute_value(
+    fire_at: i64,
+    repeat: &str,
+    days: &[u32],
+    last_fired_at: Option<i64>,
+    snoozed_until: Option<i64>,
+) -> Option<i64> {
+    compute(
+        fire_at,
+        repeat,
+        &serde_json::to_string(days).unwrap_or_else(|_| "[]".into()),
+        last_fired_at,
+        snoozed_until,
+    )
+}
+
 /// Not marked DETERMINISTIC: the result moves as occurrences are consumed.
 pub fn register(conn: &Connection) {
     let result = conn.create_scalar_function(
         "next_fire",
-        4,
+        5,
         FunctionFlags::SQLITE_UTF8,
         |ctx| -> rusqlite::Result<i64> {
             let fire_at: i64 = ctx.get(0)?;
             let repeat: String = ctx.get(1)?;
             let days: String = ctx.get(2)?;
             let last: Option<i64> = ctx.get(3)?;
-            Ok(compute(fire_at, &repeat, &days, last).unwrap_or(fire_at))
+            let snooze: Option<i64> = ctx.get(4)?;
+            Ok(compute(fire_at, &repeat, &days, last, snooze).unwrap_or(fire_at))
         },
     );
     if let Err(e) = result {
-        eprintln!("[chronotask] could not register next_fire(): {e}");
+        eprintln!("[dj-task-manager] could not register next_fire(): {e}");
     }
-}
-
-/// Convenience for callers holding parsed values (`days`: 0 = Monday .. 6 = Sunday).
-pub fn compute_value(fire_at: i64, repeat: &str, days: &[u32], last_fired_at: Option<i64>) -> Option<i64> {
-    compute(
-        fire_at,
-        repeat,
-        &serde_json::to_string(days).unwrap_or_else(|_| "[]".into()),
-        last_fired_at,
-    )
 }

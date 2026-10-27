@@ -2,8 +2,8 @@
 # Uses PrintWindow with PW_RENDERFULLCONTENT so occlusion and z-order do not matter,
 # and marks the process DPI-aware so the geometry is in physical pixels.
 param(
-    [string]$Out = "chronotask-window.png",
-    [string]$ProcessName = "chronotask",
+    [string]$Out = "dj-task-manager-window.png",
+    [string]$ProcessName = "dj-task-manager",
     [ValidateSet("print", "screen")] [string]$Method = "print",
     [int]$SettleMs = 1200
 )

@@ -1,5 +1,5 @@
-//! SQLite persistence for ChronoTask: schema, migrations, seed data, and typed queries.
-use chrono::{Datelike, Local, TimeZone};
+//! SQLite persistence for DJ Task Manager: schema, migrations, and typed queries.
+use chrono::{Local, TimeZone};
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
@@ -19,6 +19,15 @@ pub struct Db {
 /// Seconds since the Unix epoch, in the machine's local timezone terms.
 pub fn now_epoch() -> i64 {
     Local::now().timestamp()
+}
+
+/// `HH:MM` in local time, for messages built on the Rust side.
+pub fn epoch_hhmm(epoch: i64) -> String {
+    Local
+        .timestamp_opt(epoch, 0)
+        .single()
+        .map(|d| d.format("%H:%M").to_string())
+        .unwrap_or_else(|| "--:--".to_string())
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -139,6 +148,8 @@ pub struct Alarm {
     pub escalate: bool,
     /// Due time of the task whose advance warning was last sent, so it fires once.
     pub last_preflight_for: Option<i64>,
+    /// Suppresses the alarm until this instant without moving its schedule.
+    pub snoozed_until: Option<i64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -193,17 +204,40 @@ pub struct Stats {
 
 impl Db {
     /// Opens (creating it if needed) the app database in `dir`, applies pending
-    /// migrations, seeds a first-run workspace, and catches up any recurrence that
-    /// lapsed while the app was closed.
+    /// migrations, and catches up any recurrence that lapsed while the app was closed.
+    /// Starts empty by design — the workspace is the user's, not a demo.
     pub fn open(dir: &Path) -> Result<Db, String> {
-        let db = Self::open_scratch(dir, "chronotask.db")?;
-        db.seed_if_empty()?;
+        let db = Self::open_scratch(dir, "djtaskmanager.db")?;
+        db.ensure_default_settings()?;
         db.catch_up_recurring().ok();
         Ok(db)
     }
 
-    /// Schema + migrations only: no demo content, no startup catch-up. This is the
-    /// entry point tests and any future migration tooling use.
+    /// Preferences, not content: the workspace still starts with zero tasks and zero
+    /// alarms, but the toggles have a real stored value the UI can read back.
+    fn ensure_default_settings(&self) -> Result<(), String> {
+        for (key, value) in [
+            ("theme", "dark"),
+            ("close_to_tray", "true"),
+            ("native_toasts", "true"),
+            ("start_hidden", "false"),
+            ("autostart", "true"),
+            ("default_snooze", "5"),
+            ("catch_up", "true"),
+            ("compact_rows", "false"),
+        ] {
+            let c = self.lock()?;
+            c.execute(
+                "INSERT OR IGNORE INTO settings(key, value) VALUES(?1, ?2)",
+                params![key, value],
+            )
+            .map_err(|e| e.to_string())?;
+        }
+        Ok(())
+    }
+
+    /// Schema + migrations only, with no startup catch-up. This is the entry point
+    /// tests and any future migration tooling use.
     pub fn open_scratch(dir: &Path, file: &str) -> Result<Db, String> {
         std::fs::create_dir_all(dir).map_err(|e| format!("cannot create data dir: {e}"))?;
         let path = dir.join(file);
@@ -216,7 +250,7 @@ impl Db {
             migrations::run(&c)?
         };
         if !applied.is_empty() {
-            println!("[chronotask] applied migrations: {}", applied.join(", "));
+            println!("[dj-task-manager] applied migrations: {}", applied.join(", "));
         }
         Ok(db)
     }
@@ -240,168 +274,6 @@ impl Db {
         self.conn.lock().map_err(|_| "database mutex poisoned".to_string())
     }
 
-    /// First-run content so the UI opens on a populated workspace.
-    fn seed_if_empty(&self) -> Result<(), String> {
-        let count: i64 = {
-            let c = self.lock()?;
-            c.query_row("SELECT COUNT(*) FROM tasks", [], |r| r.get(0)).unwrap_or(0)
-        };
-        if count > 0 {
-            return Ok(());
-        }
-        let now = now_epoch();
-        let at = |day_offset: i64, hh: i64, mm: i64| -> i64 {
-            let base = Local
-                .with_ymd_and_hms(Local::now().year(), Local::now().month(), Local::now().day(), 0, 0, 0)
-                .single()
-                .map(|d| d.timestamp())
-                .unwrap_or(now);
-            base + day_offset * 86_400 + hh * 3_600 + mm * 60
-        };
-
-        let mut guard = self.lock()?;
-        let tx_guard = guard.transaction().map_err(|e| e.to_string())?;
-
-        let insert_task = |title: &str,
-                               notes: &str,
-                               prio: &str,
-                               status: &str,
-                               due: Option<i64>,
-                               tags: &str|
-         -> Result<i64, String> {
-            tx_guard
-                .execute(
-                    "INSERT INTO tasks(title,notes,priority,status,due_at,tags,created_at,updated_at) VALUES(?1,?2,?3,?4,?5,?6,?7,?7)",
-                    params![title, notes, prio, status, due, tags, now],
-                )
-                .map_err(|e| e.to_string())?;
-            Ok(tx_guard.last_insert_rowid())
-        };
-
-        let t1 = insert_task(
-            "Finalize SQLite IPC contextBridge Handlers",
-            "Ensure every main-thread query through contextBridge.exposeInMainWorld is guarded by a payload validation schema.\n\nSanitize prepared statement inputs with sqlstring.\nEnforce the IPC timeout at a 3000ms threshold.",
-            "p1", "doing", Some(at(0, 15, 0)), r#"["backend","release"]"#,
-        )?;
-        let t2 = insert_task(
-            "Implement Multi-threaded Cron Clock Tick Drift",
-            "Compensate for scheduler drift by re-anchoring each tick against the monotonic clock.",
-            "p2", "todo", Some(at(0, 16, 45)), r#"["core"]"#,
-        )?;
-        let t3 = insert_task(
-            "Notion Calendar OAuth2 Refresh Handshake",
-            "Handle refresh-token rotation and the 401 retry path.",
-            "p3", "todo", Some(at(1, 10, 0)), r#"["auth","frontend"]"#,
-        )?;
-        let t4 = insert_task(
-            "Audit Audio Chime Latency on macOS Sonoma",
-            "Measure the gap between scheduler fire and the first audible sample.",
-            "p1", "todo", Some(at(-1, 9, 30)), r#"["audio"]"#,
-        )?;
-        let t5 = insert_task(
-            "Sign Electron Distribution Binaries",
-            "Notarisation completed for both architectures.",
-            "p3", "done", Some(at(-2, 11, 15)), r#"["devops"]"#,
-        )?;
-        let t6 = insert_task(
-            "Draft Release Notes for v2.4.1",
-            "", "p2", "todo", Some(at(0, 18, 30)), r#"["docs"]"#,
-        )?;
-        let t7 = insert_task(
-            "Wire Tray Menu To Scheduler Pause",
-            "", "p3", "todo", Some(at(2, 14, 0)), r#"["core","ui"]"#,
-        )?;
-        let t8 = insert_task(
-            "Back Up Local Database Before Schema Change",
-            "", "p2", "done", Some(at(-1, 17, 0)), r#"["devops"]"#,
-        )?;
-        let t9 = insert_task(
-            "Profile Alarm Queue Under 500 Triggers",
-            "", "p3", "todo", Some(at(3, 11, 0)), r#"["core","perf"]"#,
-        )?;
-        let t10 = insert_task(
-            "Review Timezone Handling In Calendar Grid",
-            "", "p2", "todo", Some(at(0, 20, 0)), r#"["frontend"]"#,
-        )?;
-        let t11 = insert_task(
-            "Add Keyboard Shortcut Overlay",
-            "", "p4", "todo", None, r#"["ui"]"#,
-        )?;
-        let t12 = insert_task(
-            "Migrate Settings To SQLite Key-Value Store",
-            "", "p3", "todo", None, r#"["backend"]"#,
-        )?;
-
-        // t1..t3 gain subtasks/alarms below; the rest only populate the starter list.
-        let _ = (t4, t5, t6, t7, t8, t9, t10, t11, t12);
-
-        let subs = [
-            (t1, "Sanitize prepared statement inputs", 1),
-            (t1, "Enforce IPC timeout at 3000ms", 1),
-            (t1, "Register alert callback before window closure", 0),
-            (t2, "Anchor tick to monotonic clock", 0),
-            (t3, "Refresh token rotation", 1),
-        ];
-        for (tid, title, done) in subs {
-            tx_guard
-                .execute(
-                    "INSERT INTO subtasks(task_id,title,done) VALUES(?1,?2,?3)",
-                    params![tid, title, done],
-                )
-                .map_err(|e| e.to_string())?;
-        }
-
-        let insert_alarm = |label: &str,
-                                fire: i64,
-                                repeat: &str,
-                                days: &str,
-                                snooze: i64,
-                                sound: &str,
-                                task: Option<i64>|
-         -> Result<i64, String> {
-            tx_guard
-                .execute(
-                    "INSERT INTO alarms(label,fire_at,repeat,days,snooze_min,sound,state,task_id,created_at) VALUES(?1,?2,?3,?4,?5,?6,'armed',?7,?8)",
-                    params![label, fire, repeat, days, snooze, sound, task, now],
-                )
-                .map_err(|e| e.to_string())?;
-            Ok(tx_guard.last_insert_rowid())
-        };
-
-        let a1 = insert_alarm("Code freeze — IPC handlers", at(0, 14, 30), "none", "[]", 5, "chime", Some(t1))?;
-        insert_alarm("Standup sync", at(0, 9, 45), "weekdays", "[1,2,3,4,5]", 10, "bell", None)?;
-        insert_alarm("Deep focus block ends", at(0, 17, 15), "none", "[]", 5, "pulse", Some(t2))?;
-        tx_guard
-            .execute(
-                "INSERT INTO missed_alarms(alarm_id,label,due_at,detected_at,source,resolution,resolved_at) VALUES(?1,?2,?3,?4,'offline','unhandled',NULL)",
-                params![a1, "Audio chime latency check", at(-1, 9, 30), now],
-            )
-            .map_err(|e| e.to_string())?;
-        tx_guard
-            .execute(
-                "INSERT INTO missed_alarms(alarm_id,label,due_at,detected_at,source,resolution,resolved_at) VALUES(NULL,?2,?3,?4,'offline','snoozed',?4)",
-                params![0i64, "Weekly build review", at(-2, 15, 0), now - 3_600],
-            )
-            .map_err(|e| e.to_string())?;
-
-        for (k, v) in [
-            ("theme", "dark"),
-            ("close_to_tray", "true"),
-            ("native_toasts", "true"),
-            ("default_snooze", "5"),
-            ("catch_up", "true"),
-            ("compact_rows", "false"),
-        ] {
-            tx_guard
-                .execute("INSERT INTO settings(key,value) VALUES(?1,?2)", params![k, v])
-                .map_err(|e| e.to_string())?;
-        }
-
-        tx_guard.commit().map_err(|e| e.to_string())?;
-        Ok(())
-    }
-
-    // -- settings ----------------------------------------------------------
 
     pub fn get_setting(&self, key: &str) -> Option<String> {
         let c = self.lock().ok()?;
@@ -625,14 +497,36 @@ impl Db {
     }
 
     pub fn delete_task(&self, id: i64) -> Result<(), String> {
-        let title = {
+        let (title, attached) = {
             let c = self.lock()?;
             let t: String = c
                 .query_row("SELECT title FROM tasks WHERE id=?1", params![id], |r| r.get(0))
                 .unwrap_or_default();
+            // A reminder tied to this task must not keep firing for a task that is gone.
+            // Disarm and detach rather than delete: nothing the user made is destroyed,
+            // and the alarm can be re-armed or pointed at another task.
+            let labels: Vec<String> = c
+                .prepare("SELECT label FROM alarms WHERE task_id=?1")
+                .map_err(|e| e.to_string())?
+                .query_map(params![id], |r| r.get::<_, String>(0))
+                .map_err(|e| e.to_string())?
+                .collect::<Result<_, _>>()
+                .map_err(|e| e.to_string())?;
+            if !labels.is_empty() {
+                c.execute(
+                    "UPDATE alarms SET state='paused', task_id=NULL WHERE task_id=?1",
+                    params![id],
+                )
+                .map_err(|e| e.to_string())?;
+            }
             c.execute("DELETE FROM tasks WHERE id=?1", params![id]).map_err(|e| e.to_string())?;
-            t
+            (t, labels)
         };
+        // Written after the delete releases the lock; `alarm_id` stays NULL because the
+        // task that linked them is gone.
+        for label in attached {
+            let _ = self.record_alarm_event(None, &label, "paused", now_epoch(), "task removed");
+        }
         self.log_activity(Some(id), "deleted", &title);
         Ok(())
     }
@@ -684,7 +578,7 @@ impl Db {
     /// Column order must match `ALARM_SELECT` exactly:
     /// id, label, fire_at, repeat, days, snooze_min, sound, state, task_id, task_title,
     /// last_fired_at, next_fire_at, created_at, advance_min, snooze_count, max_snoozes,
-    /// escalate, last_preflight_for
+    /// escalate, last_preflight_for, snoozed_until
     fn row_to_alarm(r: &rusqlite::Row) -> rusqlite::Result<Alarm> {
         let days_raw: String = r.get(4)?;
         Ok(Alarm {
@@ -706,14 +600,18 @@ impl Db {
             max_snoozes: r.get(15)?,
             escalate: r.get::<_, i64>(16)? == 1,
             last_preflight_for: r.get(17)?,
+            snoozed_until: r.get(18)?,
         })
     }
 
     const ALARM_SELECT: &'static str = r#"
         SELECT a.id, a.label, a.fire_at, a.repeat, a.days, a.snooze_min, a.sound, a.state,
                a.task_id, t.title, a.last_fired_at,
-               CASE WHEN a.state = 'armed' THEN next_fire(a.fire_at, a.repeat, a.days, a.last_fired_at) ELSE NULL END,
-               a.created_at, a.advance_min, a.snooze_count, a.max_snoozes, a.escalate, a.last_preflight_for
+               CASE WHEN a.state = 'armed'
+                        THEN next_fire(a.fire_at, a.repeat, a.days, a.last_fired_at, a.snoozed_until)
+                   ELSE NULL END,
+               a.created_at, a.advance_min, a.snooze_count, a.max_snoozes, a.escalate, a.last_preflight_for,
+               a.snoozed_until
         FROM alarms a LEFT JOIN tasks t ON t.id = a.task_id
     "#;
 
@@ -824,7 +722,7 @@ impl Db {
             c.execute("DELETE FROM alarms WHERE id=?1", params![id]).map_err(|e| e.to_string())?;
             l
         };
-        let _ = self.record_alarm_event(None, &label, "disabled", now_epoch(), "alarm deleted");
+        let _ = self.record_alarm_event(None, &label, "deleted", now_epoch(), "alarm deleted");
         Ok(())
     }
 
@@ -848,14 +746,26 @@ impl Db {
             );
             return self.alarm_by_id(id);
         }
+        let when = now_epoch() + m * 60;
         {
             let c = self.lock()?;
-            c.execute(
-                "UPDATE alarms SET fire_at=?1, last_fired_at=NULL, state='armed',
+            if current.repeat == "none" || current.repeat.is_empty() {
+                // One-off: the slot itself is what should move.
+                c.execute(
+                    "UPDATE alarms SET fire_at=?1, snoozed_until=NULL, last_fired_at=NULL, state='armed',
                                      snooze_count=snooze_count+1, last_preflight_for=NULL WHERE id=?2",
-                params![now_epoch() + m * 60, id],
-            )
-            .map_err(|e| e.to_string())?;
+                    params![when, id],
+                )
+                .map_err(|e| e.to_string())?;
+            } else {
+                // Recurring: suppress until `when`, keep fire_at so the daily slot survives.
+                c.execute(
+                    "UPDATE alarms SET snoozed_until=?1, state='armed',
+                                     snooze_count=snooze_count+1, last_preflight_for=NULL WHERE id=?2",
+                    params![when, id],
+                )
+                .map_err(|e| e.to_string())?;
+            }
         }
         let alarm = self.alarm_by_id(id)?;
         let _ = self.record_alarm_event(
@@ -866,19 +776,6 @@ impl Db {
             &format!("+{m}m ({} of {})", alarm.snooze_count, if alarm.max_snoozes == 0 { "∞".to_string() } else { alarm.max_snoozes.to_string() }),
         );
         Ok(alarm)
-    }
-
-    /// Moves an alarm `seconds` into the future — backs the "Test Notification" button
-    /// so it exercises the real scheduler and OS toast path.
-    pub fn fire_now_offset(&self, id: i64, seconds: i64) -> Result<Alarm, String> {
-        let c = self.lock()?;
-        c.execute(
-            "UPDATE alarms SET fire_at=?1, last_fired_at=NULL, state='armed', snooze_count=0 WHERE id=?2",
-            params![now_epoch() + seconds, id],
-        )
-        .map_err(|e| e.to_string())?;
-        drop(c);
-        self.alarm_by_id(id)
     }
 
     /// Marks the advance warning for a given task due date as delivered.
@@ -911,11 +808,14 @@ impl Db {
             let c = self.lock()?;
             if one_off {
                 c.execute(
-                    "UPDATE alarms SET last_fired_at=?2, state='dismissed' WHERE id=?1",
+                    "UPDATE alarms SET last_fired_at=?2, state='dismissed', snoozed_until=NULL WHERE id=?1",
                     params![id, fired_at],
                 )
             } else {
-                c.execute("UPDATE alarms SET last_fired_at=?2 WHERE id=?1", params![id, fired_at])
+                c.execute(
+                    "UPDATE alarms SET last_fired_at=?2, snoozed_until=NULL WHERE id=?1",
+                    params![id, fired_at],
+                )
             }
             .map_err(|e| e.to_string())?;
         }

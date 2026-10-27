@@ -1,5 +1,5 @@
 /* ==========================================================================
-   ChronoTask — design system
+   DJ Task Manager — design system
    A "precision instrument" language: charcoal surfaces, hairline borders, deep
    soft shadows, one indigo accent, mint reserved for live/running states.
    Tokens come from the Material 3 baseline in the Stitch spec; everything else
@@ -1104,6 +1104,25 @@ textarea { resize: vertical; min-height: 104px; font-family: var(--font-code); f
 .stepper { display: flex; align-items: center; gap: var(--sp-sm); background: var(--sc-lowest); border: 1px solid var(--hair); border-radius: var(--r-md); padding: var(--sp-sm); box-shadow: inset 0 1px 3px rgba(0, 0, 0, .3); }
 .stepper-val { text-align: center; font: 650 25px/1 var(--font-code); letter-spacing: -.04em; font-variant-numeric: tabular-nums; }
 .stepper-l { font: 500 8.5px/1.6 var(--font-code); text-transform: uppercase; letter-spacing: .1em; color: var(--outline); text-align: center; }
+
+/* --- clock dial in the date & time picker --- */
+.dial { display: grid; justify-items: center; gap: 3px; user-select: none; }
+.dial svg { width: 158px; height: 158px; overflow: visible; cursor: crosshair; touch-action: none; }
+.dial-face { fill: var(--sc-lowest); stroke: var(--hair-strong); stroke-width: 1; }
+.dial-tick { stroke: var(--outline); stroke-width: 1; opacity: .3; }
+.dial-tick.is-major { stroke: var(--on-surface-variant); stroke-width: 1.7; opacity: .65; }
+/* Hour mode shows only the 12 majors; minute mode brings the 48 minors back. */
+.dial:not(.is-minute) .dial-tick:not(.is-major) { display: none; }
+.dial-num { fill: var(--on-surface-variant); font: 600 10px/1 var(--font-code); text-anchor: middle; }
+.dial.is-minute .dial-num { fill: var(--outline); opacity: .45; }
+.dial-num.is-sel { fill: var(--primary); font-weight: 800; }
+.dial-hand { stroke: var(--primary); stroke-width: 2.5; stroke-linecap: round; }
+.dial-knob { fill: var(--primary); stroke: var(--sc-lowest); stroke-width: 2; }
+.dial-pin { fill: var(--on-surface-variant); }
+.dial.is-live svg { cursor: grabbing; }
+.dial.is-live .dial-hand { stroke-width: 3; }
+.dial-readout { font: 650 21px/1.2 var(--font-code); letter-spacing: -.03em; font-variant-numeric: tabular-nums; }
+input.is-bad { border-color: var(--secondary) !important; box-shadow: 0 0 0 1px var(--secondary); }
 
 .chips { display: flex; flex-wrap: wrap; gap: 5px; }
 .chip {

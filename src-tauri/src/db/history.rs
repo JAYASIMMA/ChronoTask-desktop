@@ -8,7 +8,7 @@ use serde::Serialize;
 /// resolved.
 pub const ALARM_EVENTS: &[&str] = &[
     "armed", "fired", "missed", "preflight", "snoozed", "dismissed", "paused", "resumed", "disabled",
-    "acknowledged",
+    "acknowledged", "deleted",
 ];
 
 #[derive(Debug, Clone, Serialize)]

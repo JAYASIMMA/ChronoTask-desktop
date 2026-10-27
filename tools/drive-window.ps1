@@ -1,7 +1,7 @@
 # Focuses the ChronoTask window and sends a keystroke to it, so a specific view
 # can be selected before capturing. Digits 1..5 map to the workspace views.
 param(
-    [string]$ProcessName = "chronotask",
+    [string]$ProcessName = "dj-task-manager",
     [string]$Keys = "1",
     [int]$WaitMs = 900
 )
