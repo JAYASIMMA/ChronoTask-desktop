@@ -7,23 +7,28 @@ specifically want a single file you can drop anywhere.
 
 | File | What it is |
 | --- | --- |
-| `DJ Task Manager_2.6.0_x64-setup.exe` | NSIS installer, ~3.6 MB. Recommended. |
+| `DJ-Task-Manager_2.6.0_x64-setup.exe` | NSIS installer, ~3.6 MB. Recommended. |
 | `dj-task-manager-2.6.0-x64-portable.exe` | The same app as one ~5 MB file, no installer. |
 | `SHA256SUMS.txt` | Checksums for both. |
+
+Release assets never contain spaces: GitHub rewrites them to dots, so the bundler's
+`DJ Task Manager_2.6.0_x64-setup.exe` is published as
+`DJ-Task-Manager_2.6.0_x64-setup.exe`. Ask for the hyphenated name — a `%20` URL 404s.
 
 From the [release page](https://github.com/JAYASIMMA/ChronoTask-desktop/releases/tag/v2.6.0),
 or from a shell:
 
 ```powershell
 $base = 'https://github.com/JAYASIMMA/ChronoTask-desktop/releases/download/v2.6.0'
-Invoke-WebRequest "$base/DJ%20Task%20Manager_2.6.0_x64-setup.exe" -OutFile setup.exe
+Invoke-WebRequest "$base/DJ-Task-Manager_2.6.0_x64-setup.exe" -OutFile setup.exe
 Invoke-WebRequest "$base/SHA256SUMS.txt" -OutFile SHA256SUMS.txt
 Get-FileHash .\setup.exe -Algorithm SHA256   # compare against SHA256SUMS.txt
 ```
 
 Nothing is signed with a code-signing certificate, so SmartScreen will warn on first
 run. That is expected for an unsigned build, not a tampered one — the checksum is how
-you confirm integrity.
+you confirm integrity. Newly uploaded assets can take a few seconds to serve; a 404
+immediately after publishing usually clears on retry.
 
 ## Install with the setup file
 

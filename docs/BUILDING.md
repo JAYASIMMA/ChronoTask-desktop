@@ -127,14 +127,30 @@ cargo build --release
 npx tauri build                              # or after tools/fetch-nsis.ps1
 ```
 
-Then stage the artifacts, checksum them, and publish:
+Then stage the artifacts under release-safe names, checksum them, and publish:
 
 ```bash
 mkdir -p dist
-cp "src-tauri/target/release/bundle/nsis/DJ Task Manager_${VERSION}_x64-setup.exe" dist/
+# GitHub rewrites spaces in asset names to dots, so drop the spaces here instead of
+# shipping a filename nobody can type into a script.
+cp "src-tauri/target/release/bundle/nsis/DJ Task Manager_${VERSION}_x64-setup.exe" \
+   "dist/DJ-Task-Manager_${VERSION}_x64-setup.exe"
 cp src-tauri/target/release/dj-task-manager.exe "dist/dj-task-manager-${VERSION}-x64-portable.exe"
-(cd dist && sha256sum ./*setup.exe ./*portable.exe > SHA256SUMS.txt)
-git tag -a "v${VERSION}" -m "v${VERSION}" && git push origin "v${VERSION}"
+(cd dist && sha256sum ./DJ-Task-Manager_*_setup.exe ./dj-task-manager-*-portable.exe > SHA256SUMS.txt)
 ```
+
+```bash
+gh release create "v${VERSION}" \
+  --target "$(git rev-parse HEAD)" \
+  --title "DJ Task Manager ${VERSION}" --latest \
+  --notes-file /path/to/notes.md \
+  "dist/DJ-Task-Manager_${VERSION}_x64-setup.exe" \
+  "dist/dj-task-manager-${VERSION}-x64-portable.exe" \
+  "dist/SHA256SUMS.txt"
+```
+
+Two things that bite here: `--target` wants a **full** commit SHA — a short one is
+rejected with `Release.target_commitish is invalid` — and a freshly uploaded asset can
+404 for a few seconds before the CDN serves it.
 
 `dist/` is gitignored on purpose — binaries belong on the release, not in history.

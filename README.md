@@ -22,7 +22,7 @@ Grab a ready-made build from the
 
 | File | What it is |
 | --- | --- |
-| `DJ Task Manager_2.6.0_x64-setup.exe` | NSIS installer, ~3.6 MB. Recommended. |
+| `DJ-Task-Manager_2.6.0_x64-setup.exe` | NSIS installer, ~3.6 MB. Recommended. |
 | `dj-task-manager-2.6.0-x64-portable.exe` | The same app as one ~5 MB file, no installer. |
 | `SHA256SUMS.txt` | Checksums for both. |
 
@@ -143,7 +143,7 @@ Full instructions, including checksums and uninstall, are in
 [docs/INSTALL.md](docs/INSTALL.md). The short version:
 
 ```powershell
-Start-Process ".\DJ Task Manager_2.6.0_x64-setup.exe" -ArgumentList '/S' -Wait
+Start-Process ".\DJ-Task-Manager_2.6.0_x64-setup.exe" -ArgumentList '/S' -Wait
 powershell -ExecutionPolicy Bypass -File tools/verify-install.ps1
 ```
 
