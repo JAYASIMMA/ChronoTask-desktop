@@ -15,6 +15,31 @@ ui/         index.html · styles.css · app.js  (served from disk in dev, embedd
 tools/      build, install, verify and diagnostic scripts
 ```
 
+## Download
+
+Grab a ready-made build from the
+[latest release](https://github.com/JAYASIMMA/ChronoTask-desktop/releases/latest):
+
+| File | What it is |
+| --- | --- |
+| `DJ Task Manager_2.6.0_x64-setup.exe` | NSIS installer, ~3.6 MB. Recommended. |
+| `dj-task-manager-2.6.0-x64-portable.exe` | The same app as one ~5 MB file, no installer. |
+| `SHA256SUMS.txt` | Checksums for both. |
+
+Builds are not code-signed, so SmartScreen warns on first run; verify the checksum
+instead of overriding blindly. See [docs/INSTALL.md](docs/INSTALL.md).
+
+## Documentation
+
+| | |
+| --- | --- |
+| [docs/INSTALL.md](docs/INSTALL.md) | install, verify, upgrade, uninstall |
+| [docs/USAGE.md](docs/USAGE.md) | every view, alarm behaviour, the time picker, shortcuts |
+| [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | modules, schema, the `next_fire()` contract, trade-offs |
+| [docs/BUILDING.md](docs/BUILDING.md) | prerequisites, dev loop, release build, versioning |
+| [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md) | toasts, alarms, database, build problems |
+| [CHANGELOG.md](CHANGELOG.md) | what changed in each version |
+
 ## What it does
 
 **Tasks** — priorities, tags, notes, due dates, subtasks with progress, filters,
@@ -95,6 +120,9 @@ Or from the repository root, to also produce the installer:
 npx tauri build                 # → src-tauri/target/release/bundle/nsis/DJ Task Manager_<version>_x64-setup.exe
 ```
 
+The same as npm scripts, from the repository root: `npm run dev`, `npm run build`,
+`npm test`.
+
 > **Front-end changes need a rebuild.** Tauri embeds `ui/` at compile time.
 > `src-tauri/build.rs` emits `rerun-if-changed` for those files precisely because
 > without it a `ui/`-only edit could compile a binary that still contained the old
@@ -111,26 +139,27 @@ powershell -ExecutionPolicy Bypass -File tools/fetch-nsis.ps1
 
 ## Installing
 
-Use the installer:
+Full instructions, including checksums and uninstall, are in
+[docs/INSTALL.md](docs/INSTALL.md). The short version:
 
 ```powershell
 Start-Process ".\DJ Task Manager_2.6.0_x64-setup.exe" -ArgumentList '/S' -Wait
 powershell -ExecutionPolicy Bypass -File tools/verify-install.ps1
 ```
 
-`tools/install.ps1` is a dependency-free alternative that copies the plain `.exe` and
-registers the same Start Menu shortcut and `AppUserModelID` by hand — useful for testing
-the branded-notification path without producing an installer.
-`tools/uninstall.ps1` removes it, keeping your database unless you pass `-PurgeData`.
+Installation is per-user, so no administrator rights are needed. What a correct install
+looks like:
 
-What a correct install looks like:
-
-* binary in `%LOCALAPPDATA%\Programs\DJ Task Manager\`
+* binary in `%LOCALAPPDATA%\DJ Task Manager\` (`tools/install.ps1` uses
+  `%LOCALAPPDATA%\Programs\DJ Task Manager\` instead)
 * Start Menu and desktop shortcuts
-* an entry in *Add / Remove Programs*
-* `HKCU\Software\Classes\AppUserModelId\app.djtaskmanager.desktop` with a display name
-  and icon, which is what brands the toast
-* a `HKCU\...\CurrentVersion\Run` entry launching `dj-task-manager.exe --minimized`
+* one entry in *Add / Remove Programs*, pointing at a working uninstaller
+* an app identity Windows can resolve — the NSIS shortcut carries the `AppUserModelID`
+  itself, while `tools/install.ps1` writes
+  `HKCU\Software\Classes\AppUserModelId\app.djtaskmanager.desktop`. Either is enough;
+  both were verified with a live branded toast.
+* a `HKCU\...\CurrentVersion\Run` entry launching `dj-task-manager.exe --minimized`,
+  which **the app writes on first launch** from the stored preference, not the installer
 
 ## Running in the background
 
@@ -149,7 +178,7 @@ Everything is local. Nothing leaves the machine; there is no network layer.
 | Path | Contents |
 | --- | --- |
 | `%APPDATA%\app.djtaskmanager.desktop\djtaskmanager.db` | tasks, alarms, history, settings (+`-wal`, `-shm`) |
-| `%LOCALAPPDATA%\Programs\DJ Task Manager\` | the installed binary |
+| `%LOCALAPPDATA%\DJ Task Manager\` | the installed binary; `tools/install.ps1` uses `...\Programs\DJ Task Manager\` |
 
 A fresh database starts **empty** — no demo tasks or alarms — but with real default
 preferences, so the toggles read back actual values.
@@ -197,7 +226,7 @@ To drive the UI with `tools/cdp-eval.js`, start the app with a debugging port:
 
 ```powershell
 $env:WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS = '--remote-debugging-port=9223'
-& "$env:LOCALAPPDATA\Programs\DJ Task Manager\dj-task-manager.exe"
+& "$env:LOCALAPPDATA\DJ Task Manager\dj-task-manager.exe"
 node tools/cdp-eval.js "document.title"
 ```
 

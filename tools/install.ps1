@@ -11,7 +11,9 @@
 [CmdletBinding()]
 param(
     [string]$Source = "",
-    [string]$InstallDir = (Join-Path $env:LOCALAPPDATA "Programs\DJ Task Manager"),
+    # Same folder the NSIS installer uses, so the two installers are interchangeable
+    # rather than leaving two copies of the app side by side.
+    [string]$InstallDir = (Join-Path $env:LOCALAPPDATA "DJ Task Manager"),
     [switch]$NoDesktopShortcut,
     [switch]$StartAfter
 )
@@ -24,6 +26,9 @@ $DisplayName  = "DJ Task Manager"
 $Config       = Join-Path $PSScriptRoot "..\src-tauri\tauri.conf.json"
 $Publisher    = "DJ"
 $UninstallKey = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\$Aumid"
+# The key the NSIS installer writes. If it exists, its entry is the one that actually
+# removes the product, so this script must not shadow it with a second listing.
+$NsisKey      = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\$DisplayName"
 
 # --- locate the built binary ------------------------------------------------
 if (-not $Source) {
@@ -108,6 +113,12 @@ if (-not $NoDesktopShortcut) {
 }
 
 # --- Add / Remove Programs entry -------------------------------------------
+# If the NSIS installer already registered this product, its entry points at the real
+# uninstaller. Writing ours over the top (or alongside) would leave a second listing
+# whose "Uninstall" removes the wrong thing, so defer to it.
+if (Test-Path $NsisKey) {
+    Write-Host "  Add/Remove Programs entry left as the installer's own" -ForegroundColor Yellow
+} else {
 New-Item -Path $UninstallKey -Force | Out-Null
 Set-ItemProperty -Path $UninstallKey -Name "DisplayName"      -Value $DisplayName
 Set-ItemProperty -Path $UninstallKey -Name "DisplayVersion"   -Value $Version
@@ -122,6 +133,7 @@ if ($iconPath) { Set-ItemProperty -Path $UninstallKey -Name "DisplayIcon" -Value
 $size = [math]::Round(((Get-Item (Join-Path $InstallDir $ExeName)).Length / 1KB))
 Set-ItemProperty -Path $UninstallKey -Name "EstimatedSize" -Value $size -Type DWord
 Write-Host "  listed in Add/Remove Programs"
+}
 
 # --- launch ----------------------------------------------------------------
 if ($StartAfter) {

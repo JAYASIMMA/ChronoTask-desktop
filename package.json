@@ -1,1 +1,14 @@
-{"name":"dj-task-manager","version":"2.6.0","private":true,"devDependencies":{"@tauri-apps/cli":"^2"}}
+{
+  "name": "dj-task-manager",
+  "version": "2.6.0",
+  "private": true,
+  "scripts": {
+    "tauri": "tauri",
+    "dev": "tauri dev",
+    "build": "tauri build",
+    "test": "cargo test --manifest-path src-tauri/Cargo.toml"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2"
+  }
+}
